@@ -28,7 +28,8 @@ func NewConsumer(cfg config.KafkaConfig, topic string, log *logger.Logger) *Cons
 		MinBytes:       1,
 		MaxBytes:       10e6, // 10MB
 		CommitInterval: 1 * time.Second,
-		StartOffset:    kafka.LastOffset, // Start from latest for new consumers
+		StartOffset:    kafka.FirstOffset, // Read from beginning
+		MaxWait:        500 * time.Millisecond,
 	})
 
 	log.Infof("Kafka consumer initialized for topic: %s", topic)
@@ -51,6 +52,10 @@ func (c *Consumer) Consume(ctx context.Context, handler EventHandler) error {
 		default:
 			msg, err := c.reader.FetchMessage(ctx)
 			if err != nil {
+				if err == context.Canceled || err == context.DeadlineExceeded {
+					c.logger.Info("Consumer stopped")
+					return err
+				}
 				c.logger.Errorf("Failed to fetch message: %v", err)
 				time.Sleep(1 * time.Second) // Backoff on error
 				continue

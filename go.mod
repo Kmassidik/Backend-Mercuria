@@ -1,6 +1,6 @@
 module github.com/kmassidik/mercuria
 
-go 1.23
+go 1.24.0
 
 toolchain go1.24.10
 
@@ -10,6 +10,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/lib/pq v1.10.9
 	github.com/segmentio/kafka-go v0.4.49
+	golang.org/x/crypto v0.43.0
 )
 
 require (

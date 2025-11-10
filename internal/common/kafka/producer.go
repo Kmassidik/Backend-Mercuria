@@ -20,8 +20,8 @@ func NewProducer(cfg config.KafkaConfig, log *logger.Logger) *Producer {
 	writer := &kafka.Writer{
 		Addr:         kafka.TCP(cfg.Brokers...),
 		Balancer:     &kafka.LeastBytes{},
-		RequiredAcks: kafka.RequireAll, // Wait for all replicas
-		Async:        false,             // Synchronous for reliability
+		RequiredAcks: kafka.RequireAll,
+		Async:        false,
 	}
 
 	log.Info("Kafka producer initialized")
@@ -34,20 +34,17 @@ func NewProducer(cfg config.KafkaConfig, log *logger.Logger) *Producer {
 
 // PublishEvent publishes an event to a Kafka topic
 func (p *Producer) PublishEvent(ctx context.Context, topic string, key string, event interface{}) error {
-	// Serialize event to JSON
 	eventBytes, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("failed to marshal event: %w", err)
 	}
 
-	// Create Kafka message
 	msg := kafka.Message{
 		Topic: topic,
 		Key:   []byte(key),
 		Value: eventBytes,
 	}
 
-	// Write message
 	if err := p.writer.WriteMessages(ctx, msg); err != nil {
 		p.logger.Errorf("Failed to publish event to topic %s: %v", topic, err)
 		return fmt.Errorf("failed to publish event: %w", err)

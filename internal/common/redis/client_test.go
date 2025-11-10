@@ -151,7 +151,7 @@ func TestWalletBalanceCache(t *testing.T) {
 	}
 
 	cfg := config.RedisConfig{
-		Host:     "localhost",
+		Host:     "0.0.0.0",
 		Port:     "6379",
 		Password: "",
 		DB:       0,
