@@ -1,6 +1,7 @@
 package wallet
 
 import (
+	"context" // <-- You'll need this import
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -9,12 +10,24 @@ import (
 	"github.com/kmassidik/mercuria/internal/common/middleware"
 )
 
+// +FIX 1: Define the Service Interface
+// This interface defines the contract our handler depends on.
+type ServiceInterface interface {
+	CreateWallet(ctx context.Context, req *CreateWalletRequest) (*Wallet, error)
+	GetWallet(ctx context.Context, walletID string) (*Wallet, error)
+	Deposit(ctx context.Context, walletID string, req *DepositRequest) (*Wallet, error)
+	Withdraw(ctx context.Context, walletID string, req *WithdrawRequest) (*Wallet, error)
+	GetWalletEvents(ctx context.Context, walletID string, limit, offset int) ([]WalletEvent, error)
+}
+
 type Handler struct {
-	service *Service
+	// +FIX 2: Depend on the interface, not the concrete *Service
+	service ServiceInterface
 	logger  *logger.Logger
 }
 
-func NewHandler(service *Service, log *logger.Logger) *Handler {
+// +FIX 3: Accept the interface as a parameter
+func NewHandler(service ServiceInterface, log *logger.Logger) *Handler {
 	return &Handler{
 		service: service,
 		logger:  log,
@@ -23,7 +36,7 @@ func NewHandler(service *Service, log *logger.Logger) *Handler {
 
 // CreateWallet handles wallet creation
 func (h *Handler) CreateWallet(w http.ResponseWriter, r *http.Request) {
-	// Get user ID from JWT context
+    // ... (rest of your handler code is correct) ...
 	userID, ok := middleware.GetUserIDFromContext(r.Context())
 	if !ok {
 		h.respondError(w, http.StatusUnauthorized, "unauthorized")
@@ -36,7 +49,6 @@ func (h *Handler) CreateWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Set user ID from JWT token
 	req.UserID = userID
 
 	wallet, err := h.service.CreateWallet(r.Context(), &req)
@@ -51,13 +63,13 @@ func (h *Handler) CreateWallet(w http.ResponseWriter, r *http.Request) {
 
 // GetWallet handles wallet retrieval
 func (h *Handler) GetWallet(w http.ResponseWriter, r *http.Request) {
+    // ... (rest of your handler code is correct) ...
 	walletID := r.PathValue("id")
 	if walletID == "" {
 		h.respondError(w, http.StatusBadRequest, "wallet ID is required")
 		return
 	}
 
-	// Get user ID from JWT
 	userID, ok := middleware.GetUserIDFromContext(r.Context())
 	if !ok {
 		h.respondError(w, http.StatusUnauthorized, "unauthorized")
@@ -71,7 +83,6 @@ func (h *Handler) GetWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify wallet belongs to user
 	if wallet.UserID != userID {
 		h.respondError(w, http.StatusForbidden, "access denied")
 		return
@@ -82,13 +93,13 @@ func (h *Handler) GetWallet(w http.ResponseWriter, r *http.Request) {
 
 // Deposit handles deposit requests
 func (h *Handler) Deposit(w http.ResponseWriter, r *http.Request) {
+    // ... (rest of your handler code is correct) ...
 	walletID := r.PathValue("id")
 	if walletID == "" {
 		h.respondError(w, http.StatusBadRequest, "wallet ID is required")
 		return
 	}
 
-	// Get user ID from JWT
 	userID, ok := middleware.GetUserIDFromContext(r.Context())
 	if !ok {
 		h.respondError(w, http.StatusUnauthorized, "unauthorized")
@@ -101,7 +112,6 @@ func (h *Handler) Deposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify wallet ownership
 	wallet, err := h.service.GetWallet(r.Context(), walletID)
 	if err != nil {
 		h.respondError(w, http.StatusNotFound, "wallet not found")
@@ -113,7 +123,6 @@ func (h *Handler) Deposit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Process deposit
 	updatedWallet, err := h.service.Deposit(r.Context(), walletID, &req)
 	if err != nil {
 		h.logger.Errorf("Deposit failed: %v", err)
@@ -126,13 +135,13 @@ func (h *Handler) Deposit(w http.ResponseWriter, r *http.Request) {
 
 // Withdraw handles withdrawal requests
 func (h *Handler) Withdraw(w http.ResponseWriter, r *http.Request) {
+    // ... (rest of your handler code is correct) ...
 	walletID := r.PathValue("id")
 	if walletID == "" {
 		h.respondError(w, http.StatusBadRequest, "wallet ID is required")
 		return
 	}
 
-	// Get user ID from JWT
 	userID, ok := middleware.GetUserIDFromContext(r.Context())
 	if !ok {
 		h.respondError(w, http.StatusUnauthorized, "unauthorized")
@@ -145,7 +154,6 @@ func (h *Handler) Withdraw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify wallet ownership
 	wallet, err := h.service.GetWallet(r.Context(), walletID)
 	if err != nil {
 		h.respondError(w, http.StatusNotFound, "wallet not found")
@@ -157,7 +165,6 @@ func (h *Handler) Withdraw(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Process withdrawal
 	updatedWallet, err := h.service.Withdraw(r.Context(), walletID, &req)
 	if err != nil {
 		h.logger.Errorf("Withdrawal failed: %v", err)
@@ -170,20 +177,19 @@ func (h *Handler) Withdraw(w http.ResponseWriter, r *http.Request) {
 
 // GetWalletEvents handles wallet event history retrieval
 func (h *Handler) GetWalletEvents(w http.ResponseWriter, r *http.Request) {
+    // ... (rest of your handler code is correct) ...
 	walletID := r.PathValue("id")
 	if walletID == "" {
 		h.respondError(w, http.StatusBadRequest, "wallet ID is required")
 		return
 	}
 
-	// Get user ID from JWT
 	userID, ok := middleware.GetUserIDFromContext(r.Context())
 	if !ok {
 		h.respondError(w, http.StatusUnauthorized, "unauthorized")
 		return
 	}
 
-	// Verify wallet ownership
 	wallet, err := h.service.GetWallet(r.Context(), walletID)
 	if err != nil {
 		h.respondError(w, http.StatusNotFound, "wallet not found")
@@ -195,7 +201,6 @@ func (h *Handler) GetWalletEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Parse pagination params
 	limit := 50
 	offset := 0
 
@@ -211,7 +216,6 @@ func (h *Handler) GetWalletEvents(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Get events
 	events, err := h.service.GetWalletEvents(r.Context(), walletID, limit, offset)
 	if err != nil {
 		h.logger.Errorf("Failed to get events: %v", err)
@@ -234,4 +238,4 @@ func (h *Handler) respondJSON(w http.ResponseWriter, status int, data interface{
 
 func (h *Handler) respondError(w http.ResponseWriter, status int, message string) {
 	h.respondJSON(w, status, ErrorResponse{Error: message})
-}
+} // <-- +FIX 4: Added the missing closing brace
