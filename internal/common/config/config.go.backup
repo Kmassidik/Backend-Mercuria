@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"os"
 	"strconv"
-	"strings"
 	"time"
 )
 
@@ -51,35 +50,11 @@ type JWTConfig struct {
 	RefreshTokenTTL  time.Duration
 }
 
-// getDefaultPort returns the default port for each service according to PRD
-func getDefaultPort(serviceName string) string {
-	defaultPorts := map[string]string{
-		"auth":        "8080",
-		"wallet":      "8081",
-		"transaction": "8082",
-		"ledger":      "8083",
-		"analytics":   "8084",
-	}
-	
-	if port, exists := defaultPorts[serviceName]; exists {
-		return port
-	}
-	return "8080" // fallback
-}
-
-func Load(serviceName string) (*Config, error) {
-	// Priority order for port configuration:
-	// 1. SERVICE_PORT (e.g., AUTH_PORT=8080)
-	// 2. Generic PORT env var
-	// 3. Service-specific default from PRD
-	
-	servicePortEnv := fmt.Sprintf("%s_PORT", strings.ToUpper(serviceName))
-	defaultPort := getDefaultPort(serviceName)
-	
-	cfg := &Config{
+func Load(serviceName string) (*Config, error){
+	cfg:= &Config{
 		Service: ServiceConfig{
-			Name:        serviceName,
-			Port:        getEnv(servicePortEnv, getEnv("PORT", defaultPort)),
+			Name: serviceName,
+			Port:        getEnv("PORT", "8080"),
 			Environment: getEnv("ENV", "dev"),
 		},
 		Database: DatabaseConfig{
@@ -109,7 +84,7 @@ func Load(serviceName string) (*Config, error) {
 		},
 	}
 
-	// Validation for production
+	// cfg = config
 	if cfg.Service.Environment == "production" {
 		if cfg.JWT.Secret == "your-secret-key-change-in-production" {
 			return nil, fmt.Errorf("JWT_SECRET must be set in production")
