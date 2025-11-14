@@ -17,6 +17,7 @@ import (
 	"github.com/kmassidik/mercuria/internal/common/middleware"
 	"github.com/kmassidik/mercuria/internal/common/redis"
 	"github.com/kmassidik/mercuria/internal/wallet"
+	"github.com/kmassidik/mercuria/pkg/outbox"
 )
 
 func main() {
@@ -53,9 +54,12 @@ func main() {
 	producer := kafka.NewProducer(cfg.Kafka, log)
 	defer producer.Close()
 
-	// Initialize repository, service, and handler
+	// Initialize repositories
 	repo := wallet.NewRepository(database, log)
-	service := wallet.NewService(repo, redisClient, producer, log)
+	outboxRepo := outbox.NewRepository(database.DB, log)
+
+	// Initialize service with outbox
+	service := wallet.NewService(repo, outboxRepo, redisClient, producer, database, log)
 	handler := wallet.NewHandler(service, log)
 
 	// Create HTTP server
@@ -75,6 +79,14 @@ func main() {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"healthy"}`))
 	})
+
+	// Start outbox publisher (background worker)
+	outboxPublisher := outbox.NewPublisher(outboxRepo, producer, log, 5*time.Second)
+	publisherCtx, cancelPublisher := context.WithCancel(context.Background())
+	defer cancelPublisher()
+
+	go outboxPublisher.Start(publisherCtx)
+	log.Info("Outbox publisher started")
 
 	server := &http.Server{
 		Addr:         ":" + cfg.Service.Port,
@@ -99,6 +111,10 @@ func main() {
 
 	log.Info("Shutting down server...")
 
+	// Cancel background workers
+	cancelPublisher()
+
+	// Shutdown HTTP server
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 

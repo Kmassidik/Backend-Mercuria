@@ -16,6 +16,8 @@ type DB struct {
 	logger *logger.Logger
 }
 
+type TxFunc func(ctx context.Context, tx *sql.Tx) error
+
 // Connect establishes a connection to PostgreSQL
 func Connect(cfg config.DatabaseConfig, log *logger.Logger) (*DB, error) {
 	dsn := fmt.Sprintf(
@@ -61,29 +63,30 @@ func (db *DB) Health(ctx context.Context) error {
 }
 
 // WithTransaction executes a function within a transaction
-func (db *DB) WithTransaction(ctx context.Context, fn func(*sql.Tx) error) error {
-	tx, err := db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("failed to begin transaction: %w", err)
-	}
+func (db *DB) WithTransaction(ctx context.Context, fn TxFunc) error { // <- Change fn's type
+    tx, err := db.BeginTx(ctx, nil)
+    if err != nil {
+        return fmt.Errorf("failed to begin transaction: %w", err)
+    }
 
-	defer func() {
-		if p := recover(); p != nil {
-			_ = tx.Rollback()
-			panic(p) // re-throw panic after rollback
-		}
-	}()
+    defer func() {
+        if p := recover(); p != nil {
+            _ = tx.Rollback()
+            panic(p) // re-throw panic after rollback
+        }
+    }()
 
-	if err := fn(tx); err != nil {
-		if rbErr := tx.Rollback(); rbErr != nil {
-			return fmt.Errorf("tx error: %v, rollback error: %v", err, rbErr)
-		}
-		return err
-	}
+    // Pass BOTH context and transaction to the function fn
+    if err := fn(ctx, tx); err != nil { 
+        if rbErr := tx.Rollback(); rbErr != nil {
+            return fmt.Errorf("tx error: %v, rollback error: %v", err, rbErr)
+        }
+        return err
+    }
 
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("failed to commit transaction: %w", err)
-	}
+    if err := tx.Commit(); err != nil {
+        return fmt.Errorf("failed to commit transaction: %w", err)
+    }
 
-	return nil
+    return nil
 }

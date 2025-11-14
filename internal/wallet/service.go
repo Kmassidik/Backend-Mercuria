@@ -3,28 +3,35 @@ package wallet
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"time"
 
+	"github.com/kmassidik/mercuria/internal/common/db"
 	"github.com/kmassidik/mercuria/internal/common/kafka"
 	"github.com/kmassidik/mercuria/internal/common/logger"
 	"github.com/kmassidik/mercuria/internal/common/redis"
+	"github.com/kmassidik/mercuria/pkg/outbox"
 )
 
 type Service struct {
-	repo     *Repository
-	redis    *redis.Client
-	producer *kafka.Producer
-	logger   *logger.Logger
+	repo       *Repository
+	outboxRepo *outbox.Repository
+	redis      *redis.Client
+	producer   *kafka.Producer
+	db         *db.DB
+	logger     *logger.Logger
 }
 
-func NewService(repo *Repository, redisClient *redis.Client, producer *kafka.Producer, log *logger.Logger) *Service {
+func NewService(repo *Repository, outboxRepo *outbox.Repository, redisClient *redis.Client, producer *kafka.Producer, database *db.DB, log *logger.Logger) *Service {
 	return &Service{
-		repo:     repo,
-		redis:    redisClient,
-		producer: producer,
-		logger:   log,
+		repo:       repo,
+		outboxRepo: outboxRepo,
+		redis:      redisClient,
+		producer:   producer,
+		db:         database,
+		logger:     log,
 	}
 }
 
@@ -41,29 +48,68 @@ func (s *Service) CreateWallet(ctx context.Context, req *CreateWalletRequest) (*
 		return nil, fmt.Errorf("wallet already exists for user %s with currency %s", req.UserID, req.Currency)
 	}
 
-	// Create wallet
-	wallet := &Wallet{
-		UserID:   req.UserID,
-		Currency: req.Currency,
-		Balance:  "0.0000",
-		Status:   StatusActive,
-	}
+	var created *Wallet
 
-	created, err := s.repo.CreateWallet(ctx, wallet)
+	// Use transaction for atomicity
+	err := s.db.WithTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		// Create wallet
+		wallet := &Wallet{
+			UserID:   req.UserID,
+			Currency: req.Currency,
+			Balance:  "0.0000",
+			Status:   StatusActive,
+		}
+
+		// Insert wallet
+		query := `
+			INSERT INTO wallets (user_id, currency, balance, status)
+			VALUES ($1, $2, $3, $4)
+			RETURNING id, created_at, updated_at
+		`
+		err := tx.QueryRowContext(
+			ctx,
+			query,
+			wallet.UserID,
+			wallet.Currency,
+			wallet.Balance,
+			wallet.Status,
+		).Scan(&wallet.ID, &wallet.CreatedAt, &wallet.UpdatedAt)
+
+		if err != nil {
+			return fmt.Errorf("failed to create wallet: %w", err)
+		}
+
+		created = wallet
+
+		// Save event to outbox (same transaction)
+		eventData := WalletCreatedEvent{
+			WalletID:  created.ID,
+			UserID:    created.UserID,
+			Currency:  created.Currency,
+			CreatedAt: created.CreatedAt,
+		}
+
+		// Convert event to map for outbox
+		eventBytes, _ := json.Marshal(eventData)
+		var eventMap map[string]interface{}
+		json.Unmarshal(eventBytes, &eventMap)
+
+		outboxEvent := &outbox.OutboxEvent{
+			AggregateID: created.ID,
+			EventType:   "wallet.created",
+			Topic:       "wallet.created",
+			Payload:     eventMap,
+		}
+
+		if err := s.outboxRepo.SaveEvent(ctx, tx, outboxEvent); err != nil {
+			return fmt.Errorf("failed to save outbox event: %w", err)
+		}
+
+		return nil
+	})
+
 	if err != nil {
-		return nil, fmt.Errorf("failed to create wallet: %w", err)
-	}
-
-	// Publish wallet created event
-	event := WalletCreatedEvent{
-		WalletID:  created.ID,
-		UserID:    created.UserID,
-		Currency:  created.Currency,
-		CreatedAt: created.CreatedAt,
-	}
-
-	if err := s.producer.PublishEvent(ctx, "wallet.created", created.ID, event); err != nil {
-		s.logger.Warnf("Failed to publish wallet created event: %v", err)
+		return nil, err
 	}
 
 	s.logger.Infof("Wallet created: %s for user %s", created.ID, created.UserID)
@@ -127,7 +173,9 @@ func (s *Service) Deposit(ctx context.Context, walletID string, req *DepositRequ
 
 	// Start transaction
 	var updatedWallet *Wallet
-	err = s.repo.db.WithTransaction(ctx, func(tx *sql.Tx) error {
+	var balanceBefore, balanceAfter string
+
+	err = s.db.WithTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		// Get wallet with lock
 		wallet, err := s.repo.GetWalletForUpdate(ctx, tx, walletID)
 		if err != nil {
@@ -139,18 +187,19 @@ func (s *Service) Deposit(ctx context.Context, walletID string, req *DepositRequ
 		}
 
 		// Calculate new balance
-		balanceBefore := wallet.Balance
+		balanceBefore = wallet.Balance
 		newBalance, err := addAmounts(wallet.Balance, req.Amount)
 		if err != nil {
 			return fmt.Errorf("failed to calculate new balance: %w", err)
 		}
+		balanceAfter = newBalance
 
 		// Update balance
 		if err := s.repo.UpdateBalanceWithLock(ctx, tx, walletID, newBalance); err != nil {
 			return err
 		}
 
-		// Create event
+		// Create wallet event
 		event := &WalletEvent{
 			WalletID:      walletID,
 			EventType:     EventTypeDeposit,
@@ -165,6 +214,33 @@ func (s *Service) Deposit(ctx context.Context, walletID string, req *DepositRequ
 
 		if _, err := s.repo.CreateWalletEventTx(ctx, tx, event); err != nil {
 			return err
+		}
+
+		// Save balance updated event to outbox
+		balanceEventData := BalanceUpdatedEvent{
+			WalletID:      walletID,
+			UserID:        wallet.UserID,
+			EventType:     EventTypeDeposit,
+			Amount:        req.Amount,
+			BalanceBefore: balanceBefore,
+			BalanceAfter:  balanceAfter,
+			Timestamp:     time.Now(),
+		}
+
+		// Convert event to map for outbox
+		eventBytes, _ := json.Marshal(balanceEventData)
+		var eventMap map[string]interface{}
+		json.Unmarshal(eventBytes, &eventMap)
+
+		outboxEvent := &outbox.OutboxEvent{
+			AggregateID: walletID,
+			EventType:   "wallet.balance_updated",
+			Topic:       "wallet.balance_updated",
+			Payload:     eventMap,
+		}
+
+		if err := s.outboxRepo.SaveEvent(ctx, tx, outboxEvent); err != nil {
+			return fmt.Errorf("failed to save outbox event: %w", err)
 		}
 
 		// Get updated wallet
@@ -183,21 +259,6 @@ func (s *Service) Deposit(ctx context.Context, walletID string, req *DepositRequ
 
 	// Invalidate cache
 	s.redis.InvalidateWalletBalance(ctx, walletID)
-
-	// Publish balance updated event
-	balanceEvent := BalanceUpdatedEvent{
-		WalletID:      walletID,
-		UserID:        updatedWallet.UserID,
-		EventType:     EventTypeDeposit,
-		Amount:        req.Amount,
-		BalanceBefore: updatedWallet.Balance, // This should be old balance, but we'll use new for simplicity
-		BalanceAfter:  updatedWallet.Balance,
-		Timestamp:     time.Now(),
-	}
-
-	if err := s.producer.PublishEvent(ctx, "wallet.balance_updated", walletID, balanceEvent); err != nil {
-		s.logger.Warnf("Failed to publish balance updated event: %v", err)
-	}
 
 	s.logger.Infof("Deposit successful: %s to wallet %s", req.Amount, walletID)
 	return updatedWallet, nil
@@ -232,7 +293,9 @@ func (s *Service) Withdraw(ctx context.Context, walletID string, req *WithdrawRe
 
 	// Start transaction
 	var updatedWallet *Wallet
-	err = s.repo.db.WithTransaction(ctx, func(tx *sql.Tx) error {
+	var balanceBefore, balanceAfter string
+
+	err = s.db.WithTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
 		// Get wallet with lock
 		wallet, err := s.repo.GetWalletForUpdate(ctx, tx, walletID)
 		if err != nil {
@@ -249,18 +312,19 @@ func (s *Service) Withdraw(ctx context.Context, walletID string, req *WithdrawRe
 		}
 
 		// Calculate new balance
-		balanceBefore := wallet.Balance
+		balanceBefore = wallet.Balance
 		newBalance, err := subtractAmounts(wallet.Balance, req.Amount)
 		if err != nil {
 			return fmt.Errorf("failed to calculate new balance: %w", err)
 		}
+		balanceAfter = newBalance
 
 		// Update balance
 		if err := s.repo.UpdateBalanceWithLock(ctx, tx, walletID, newBalance); err != nil {
 			return err
 		}
 
-		// Create event
+		// Create wallet event
 		event := &WalletEvent{
 			WalletID:      walletID,
 			EventType:     EventTypeWithdrawal,
@@ -277,8 +341,36 @@ func (s *Service) Withdraw(ctx context.Context, walletID string, req *WithdrawRe
 			return err
 		}
 
+		// Save balance updated event to outbox
+		balanceEventData := BalanceUpdatedEvent{
+			WalletID:      walletID,
+			UserID:        wallet.UserID,
+			EventType:     EventTypeWithdrawal,
+			Amount:        req.Amount,
+			BalanceBefore: balanceBefore,
+			BalanceAfter:  balanceAfter,
+			Timestamp:     time.Now(),
+		}
+
+		// Convert event to map for outbox
+		eventBytes, _ := json.Marshal(balanceEventData)
+		var eventMap map[string]interface{}
+		json.Unmarshal(eventBytes, &eventMap)
+
+		outboxEvent := &outbox.OutboxEvent{
+			AggregateID: walletID,
+			EventType:   "wallet.balance_updated",
+			Topic:       "wallet.balance_updated",
+			Payload:     eventMap,
+		}
+
+		if err := s.outboxRepo.SaveEvent(ctx, tx, outboxEvent); err != nil {
+			return fmt.Errorf("failed to save outbox event: %w", err)
+		}
+
 		// Get updated wallet
-		updatedWallet, err = s.repo.GetWallet(ctx, walletID)
+		// updatedWallet, err = s.repo.GetWallet(ctx, walletID)
+		updatedWallet, err = s.repo.GetWalletTx(ctx, tx, walletID)
 		return err
 	})
 
@@ -293,21 +385,6 @@ func (s *Service) Withdraw(ctx context.Context, walletID string, req *WithdrawRe
 
 	// Invalidate cache
 	s.redis.InvalidateWalletBalance(ctx, walletID)
-
-	// Publish balance updated event
-	balanceEvent := BalanceUpdatedEvent{
-		WalletID:      walletID,
-		UserID:        updatedWallet.UserID,
-		EventType:     EventTypeWithdrawal,
-		Amount:        req.Amount,
-		BalanceBefore: updatedWallet.Balance,
-		BalanceAfter:  updatedWallet.Balance,
-		Timestamp:     time.Now(),
-	}
-
-	if err := s.producer.PublishEvent(ctx, "wallet.balance_updated", walletID, balanceEvent); err != nil {
-		s.logger.Warnf("Failed to publish balance updated event: %v", err)
-	}
 
 	s.logger.Infof("Withdrawal successful: %s from wallet %s", req.Amount, walletID)
 	return updatedWallet, nil

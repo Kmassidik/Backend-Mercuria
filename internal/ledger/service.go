@@ -36,113 +36,117 @@ func NewService(
 // NOTE: Every transaction generates 2 entries - debit and credit
 // This is called by Kafka consumer when transaction.completed event arrives
 func (s *Service) CreateLedgerEntries(ctx context.Context, req *CreateLedgerEntriesRequest) ([]LedgerEntry, error) {
-	var entries []LedgerEntry
+    var entries []LedgerEntry
 
-	// Execute in transaction to ensure atomicity
-	err := s.db.WithTransaction(ctx, func(tx *sql.Tx) error {
-		// 1. Get current balances from ledger (for audit trail)
-		fromBalance, err := s.repo.GetLatestBalance(ctx, req.FromWalletID)
-		if err != nil {
-			return fmt.Errorf("failed to get from balance: %w", err)
-		}
+    // Execute in transaction to ensure atomicity
+    // FIX: Change function signature to include context.Context
+    err := s.db.WithTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error { 
+        // 1. Get current balances from ledger (for audit trail)
+        // NOTE: The repo methods below must also be updated to use the provided 'ctx' and 'tx' if they are transactional.
+        // Assuming your repository methods (GetLatestBalance, CreateLedgerEntryTx, SaveEvent) use the passed context/tx correctly.
+        
+        fromBalance, err := s.repo.GetLatestBalance(ctx, req.FromWalletID)
+        if err != nil {
+            return fmt.Errorf("failed to get from balance: %w", err)
+        }
 
-		toBalance, err := s.repo.GetLatestBalance(ctx, req.ToWalletID)
-		if err != nil {
-			return fmt.Errorf("failed to get to balance: %w", err)
-		}
+        toBalance, err := s.repo.GetLatestBalance(ctx, req.ToWalletID)
+        if err != nil {
+            return fmt.Errorf("failed to get to balance: %w", err)
+        }
 
-		// 2. Calculate new balances
-		newFromBalance, err := subtractAmounts(fromBalance, req.Amount)
-		if err != nil {
-			return fmt.Errorf("failed to calculate from balance: %w", err)
-		}
+        // 2. Calculate new balances
+        newFromBalance, err := subtractAmounts(fromBalance, req.Amount)
+        if err != nil {
+            return fmt.Errorf("failed to calculate from balance: %w", err)
+        }
 
-		newToBalance, err := addAmounts(toBalance, req.Amount)
-		if err != nil {
-			return fmt.Errorf("failed to calculate to balance: %w", err)
-		}
+        newToBalance, err := addAmounts(toBalance, req.Amount)
+        if err != nil {
+            return fmt.Errorf("failed to calculate to balance: %w", err)
+        }
 
-		// 3. Create DEBIT entry (money leaving source wallet)
-		debitEntry := &LedgerEntry{
-			TransactionID: req.TransactionID,
-			WalletID:      req.FromWalletID,
-			EntryType:     EntryTypeDebit,
-			Amount:        req.Amount,
-			Currency:      req.Currency,
-			Balance:       newFromBalance,
-			Description:   fmt.Sprintf("Transfer to %s: %s", req.ToWalletID, req.Description),
-			Metadata: map[string]interface{}{
-				"to_wallet_id": req.ToWalletID,
-			},
-		}
+        // 3. Create DEBIT entry (money leaving source wallet)
+        debitEntry := &LedgerEntry{
+            TransactionID: req.TransactionID,
+            WalletID:      req.FromWalletID,
+            EntryType:     EntryTypeDebit,
+            Amount:        req.Amount,
+            Currency:      req.Currency,
+            Balance:       newFromBalance,
+            Description:   fmt.Sprintf("Transfer to %s: %s", req.ToWalletID, req.Description),
+            Metadata: map[string]interface{}{
+                "to_wallet_id": req.ToWalletID,
+            },
+        }
 
-		createdDebit, err := s.repo.CreateLedgerEntryTx(ctx, tx, debitEntry)
-		if err != nil {
-			return fmt.Errorf("failed to create debit entry: %w", err)
-		}
-		entries = append(entries, *createdDebit)
+        createdDebit, err := s.repo.CreateLedgerEntryTx(ctx, tx, debitEntry)
+        if err != nil {
+            return fmt.Errorf("failed to create debit entry: %w", err)
+        }
+        entries = append(entries, *createdDebit)
 
-		// 4. Create CREDIT entry (money entering destination wallet)
-		creditEntry := &LedgerEntry{
-			TransactionID: req.TransactionID,
-			WalletID:      req.ToWalletID,
-			EntryType:     EntryTypeCredit,
-			Amount:        req.Amount,
-			Currency:      req.Currency,
-			Balance:       newToBalance,
-			Description:   fmt.Sprintf("Transfer from %s: %s", req.FromWalletID, req.Description),
-			Metadata: map[string]interface{}{
-				"from_wallet_id": req.FromWalletID,
-			},
-		}
+        // 4. Create CREDIT entry (money entering destination wallet)
+        creditEntry := &LedgerEntry{
+            TransactionID: req.TransactionID,
+            WalletID:      req.ToWalletID,
+            EntryType:     EntryTypeCredit,
+            Amount:        req.Amount,
+            Currency:      req.Currency,
+            Balance:       newToBalance,
+            Description:   fmt.Sprintf("Transfer from %s: %s", req.FromWalletID, req.Description),
+            Metadata: map[string]interface{}{
+                "from_wallet_id": req.FromWalletID,
+            },
+        }
 
-		createdCredit, err := s.repo.CreateLedgerEntryTx(ctx, tx, creditEntry)
-		if err != nil {
-			return fmt.Errorf("failed to create credit entry: %w", err)
-		}
-		entries = append(entries, *createdCredit)
+        createdCredit, err := s.repo.CreateLedgerEntryTx(ctx, tx, creditEntry)
+        if err != nil {
+            return fmt.Errorf("failed to create credit entry: %w", err)
+        }
+        entries = append(entries, *createdCredit)
 
-		// 5. Create outbox events for each entry
-		for _, entry := range entries {
-			event := &outbox.OutboxEvent{
-				AggregateID: entry.ID,
-				EventType:   "ledger.entry_created",
-				Topic:       "ledger.entry_created",
-				Payload: map[string]interface{}{
-					"entry_id":       entry.ID,
-					"transaction_id": entry.TransactionID,
-					"wallet_id":      entry.WalletID,
-					"entry_type":     entry.EntryType,
-					"amount":         entry.Amount,
-					"currency":       entry.Currency,
-					"balance":        entry.Balance,
-					"created_at":     entry.CreatedAt,
-				},
-			}
+        // 5. Create outbox events for each entry
+        for _, entry := range entries {
+            event := &outbox.OutboxEvent{
+                AggregateID: entry.ID,
+                EventType:   "ledger.entry_created",
+                Topic:       "ledger.entry_created",
+                Payload: map[string]interface{}{
+                    "entry_id":       entry.ID,
+                    "transaction_id": entry.TransactionID,
+                    "wallet_id":      entry.WalletID,
+                    "entry_type":     entry.EntryType,
+                    "amount":         entry.Amount,
+                    "currency":       entry.Currency,
+                    "balance":        entry.Balance,
+                    "created_at":     entry.CreatedAt,
+                },
+            }
 
-			if err := s.outboxRepo.SaveEvent(ctx, tx, event); err != nil {
-				return fmt.Errorf("failed to save outbox event: %w", err)
-			}
-		}
+            if err := s.outboxRepo.SaveEvent(ctx, tx, event); err != nil {
+                return fmt.Errorf("failed to save outbox event: %w", err)
+            }
+        }
 
-		return nil
-	})
+        return nil
+    })
 
-	if err != nil {
-		s.logger.Errorf("Failed to create ledger entries: %v", err)
-		return nil, err
-	}
+    if err != nil {
+        s.logger.Errorf("Failed to create ledger entries: %v", err)
+        return nil, err
+    }
 
-	// 6. Verify double-entry balance
-	balanced, err := s.repo.VerifyTransactionBalance(ctx, req.TransactionID)
-	if err != nil {
-		s.logger.Errorf("Failed to verify transaction balance: %v", err)
-	} else if !balanced {
-		s.logger.Errorf("CRITICAL: Transaction %s is unbalanced!", req.TransactionID)
-	}
+    // 6. Verify double-entry balance
+    balanced, err := s.repo.VerifyTransactionBalance(ctx, req.TransactionID)
+    if err != nil {
+        s.logger.Errorf("Failed to verify transaction balance: %v", err)
+    } else if !balanced {
+        s.logger.Errorf("CRITICAL: Transaction %s is unbalanced!", req.TransactionID)
+    }
 
-	s.logger.Infof("Ledger entries created for transaction %s: %d entries", req.TransactionID, len(entries))
-	return entries, nil
+    s.logger.Infof("Ledger entries created for transaction %s: %d entries", req.TransactionID, len(entries))
+    return entries, nil
 }
 
 // GetLedgerEntry retrieves a single ledger entry

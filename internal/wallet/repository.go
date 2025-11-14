@@ -295,3 +295,32 @@ func (r *Repository) GetWalletEvents(ctx context.Context, walletID string, limit
 
 	return events, nil
 }
+
+func (r *Repository) GetWalletTx(ctx context.Context, tx *sql.Tx, id string) (*Wallet, error) {
+    query := `
+        SELECT id, user_id, currency, balance, status, created_at, updated_at
+        FROM wallets
+        WHERE id = $1
+    `
+
+    wallet := &Wallet{}
+    // CRITICAL: Use tx.QueryRowContext instead of r.db.QueryRowContext
+    err := tx.QueryRowContext(ctx, query, id).Scan( 
+        &wallet.ID,
+        &wallet.UserID,
+        &wallet.Currency,
+        &wallet.Balance,
+        &wallet.Status,
+        &wallet.CreatedAt,
+        &wallet.UpdatedAt,
+    )
+
+    if err == sql.ErrNoRows {
+        return nil, fmt.Errorf("wallet not found")
+    }
+    if err != nil {
+        return nil, fmt.Errorf("failed to get wallet from transaction: %w", err)
+    }
+
+    return wallet, nil
+}

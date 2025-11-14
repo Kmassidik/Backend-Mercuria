@@ -13,17 +13,31 @@ import (
 
 // OutboxEvent represents an event waiting to be published to Kafka
 // NOTE: This ensures exactly-once delivery - events are saved to DB first, then published
+
+// type OutboxEvent struct {
+// 	ID           string                 `json:"id"`
+// 	AggregateID  string                 `json:"aggregate_id"`  // e.g., wallet_id, transaction_id
+// 	EventType    string                 `json:"event_type"`    // e.g., "wallet.balance_updated"
+// 	Topic        string                 `json:"topic"`         // Kafka topic name
+// 	Payload      map[string]interface{} `json:"payload"`       // Event data
+// 	Status       string                 `json:"status"`        // pending, published, failed
+// 	Attempts     int                    `json:"attempts"`      // Retry counter
+// 	LastError    string                 `json:"last_error"`    // Error message if failed
+// 	CreatedAt    time.Time              `json:"created_at"`
+// 	PublishedAt  *time.Time             `json:"published_at"`
+// }
+
 type OutboxEvent struct {
-	ID           string                 `json:"id"`
-	AggregateID  string                 `json:"aggregate_id"`  // e.g., wallet_id, transaction_id
-	EventType    string                 `json:"event_type"`    // e.g., "wallet.balance_updated"
-	Topic        string                 `json:"topic"`         // Kafka topic name
-	Payload      map[string]interface{} `json:"payload"`       // Event data
-	Status       string                 `json:"status"`        // pending, published, failed
-	Attempts     int                    `json:"attempts"`      // Retry counter
-	LastError    string                 `json:"last_error"`    // Error message if failed
-	CreatedAt    time.Time              `json:"created_at"`
-	PublishedAt  *time.Time             `json:"published_at"`
+    ID           string                 `json:"id"`
+    AggregateID  string                 `json:"aggregate_id"`
+    EventType    string                 `json:"event_type"`
+    Topic        string                 `json:"topic"`
+    Payload      map[string]interface{} `json:"payload"`
+    Status       string                 `json:"status"`
+    Attempts     int                    `json:"attempts"`
+    LastError    sql.NullString         `json:"last_error"`    // <-- FIX: Changed to sql.NullString
+    CreatedAt    time.Time              `json:"created_at"`
+    PublishedAt  sql.NullTime           `json:"published_at"`  // <-- GOOD PRACTICE: Changed from *time.Time
 }
 
 const (
@@ -85,46 +99,55 @@ func (r *Repository) SaveEvent(ctx context.Context, tx *sql.Tx, event *OutboxEve
 // NOTE: This is called by the background worker to publish events to Kafka
 func (r *Repository) GetPendingEvents(ctx context.Context, limit int) ([]OutboxEvent, error) {
 	query := `
-		SELECT id, aggregate_id, event_type, topic, payload, status, attempts, last_error, created_at
-		FROM outbox_events
-		WHERE status = $1 AND attempts < 5
-		ORDER BY created_at ASC
-		LIMIT $2
-	`
+        SELECT id, aggregate_id, event_type, topic, payload, status, attempts, last_error, created_at, published_at
+        FROM outbox_events
+        WHERE status = $1 AND attempts < 5
+        ORDER BY created_at ASC
+        LIMIT $2
+    `
 
 	rows, err := r.db.QueryContext(ctx, query, StatusPending, limit)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get pending events: %w", err)
-	}
-	defer rows.Close()
+    if err != nil {
+        return nil, fmt.Errorf("failed to get pending events: %w", err)
+    }
+    defer rows.Close()
 
 	var events []OutboxEvent
 	for rows.Next() {
 		var event OutboxEvent
 		var payloadJSON []byte
-
+		// Variables for nullable fields
+        var lastError sql.NullString 
+        var publishedAt sql.NullTime
+		
 		err := rows.Scan(
-			&event.ID,
-			&event.AggregateID,
-			&event.EventType,
-			&event.Topic,
-			&payloadJSON,
-			&event.Status,
-			&event.Attempts,
-			&event.LastError,
-			&event.CreatedAt,
-		)
+            &event.ID,
+            &event.AggregateID,
+            &event.EventType,
+            &event.Topic,
+            &payloadJSON,
+            &event.Status,
+            &event.Attempts,
+            &lastError,          // Scan into sql.NullString
+            &event.CreatedAt,
+            &publishedAt,        // Scan into sql.NullTime
+        )
+
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan event: %w", err)
 		}
-
+		
+		// Assign nullable variables back to the struct fields
+        event.LastError = lastError
+        event.PublishedAt = publishedAt
+		
 		// Unmarshal payload
-		if err := json.Unmarshal(payloadJSON, &event.Payload); err != nil {
-			r.logger.Warnf("Failed to unmarshal payload for event %s: %v", event.ID, err)
-			continue
-		}
+        if err := json.Unmarshal(payloadJSON, &event.Payload); err != nil {
+            r.logger.Warnf("Failed to unmarshal payload for event %s: %v", event.ID, err)
+            continue
+        }
 
-		events = append(events, event)
+        events = append(events, event)
 	}
 
 	return events, nil

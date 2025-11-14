@@ -22,6 +22,7 @@ func NewProducer(cfg config.KafkaConfig, log *logger.Logger) *Producer {
 		Balancer:     &kafka.LeastBytes{},
 		RequiredAcks: kafka.RequireAll,
 		Async:        false,
+		AllowAutoTopicCreation: true,
 	}
 
 	log.Info("Kafka producer initialized")
