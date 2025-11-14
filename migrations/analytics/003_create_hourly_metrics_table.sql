@@ -1,3 +1,11 @@
+-- +goose Down
+DROP TRIGGER IF EXISTS trigger_hourly_metrics_updated_at ON hourly_metrics;
+DROP FUNCTION IF EXISTS update_hourly_metrics_updated_at();
+DROP INDEX IF EXISTS idx_hourly_metrics_created_at;
+DROP INDEX IF EXISTS idx_hourly_metrics_volume;
+DROP INDEX IF EXISTS idx_hourly_metrics_hour;
+DROP TABLE IF EXISTS hourly_metrics;
+
 -- +goose Up
 -- Create hourly_metrics table for real-time monitoring and alerting
 CREATE TABLE IF NOT EXISTS hourly_metrics (
@@ -40,11 +48,3 @@ CREATE TRIGGER trigger_hourly_metrics_updated_at
     BEFORE UPDATE ON hourly_metrics
     FOR EACH ROW
     EXECUTE FUNCTION update_hourly_metrics_updated_at();
-
--- +goose Down
-DROP TRIGGER IF EXISTS trigger_hourly_metrics_updated_at ON hourly_metrics;
-DROP FUNCTION IF EXISTS update_hourly_metrics_updated_at();
-DROP INDEX IF EXISTS idx_hourly_metrics_created_at;
-DROP INDEX IF EXISTS idx_hourly_metrics_volume;
-DROP INDEX IF EXISTS idx_hourly_metrics_hour;
-DROP TABLE IF EXISTS hourly_metrics;

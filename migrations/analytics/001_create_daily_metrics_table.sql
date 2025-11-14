@@ -1,3 +1,10 @@
+-- +goose Down
+DROP TRIGGER IF EXISTS trigger_daily_metrics_updated_at ON daily_metrics;
+DROP FUNCTION IF EXISTS update_daily_metrics_updated_at();
+DROP INDEX IF EXISTS idx_daily_metrics_created_at;
+DROP INDEX IF EXISTS idx_daily_metrics_date;
+DROP TABLE IF EXISTS daily_metrics;
+
 -- +goose Up
 -- Create daily_metrics table for aggregated daily statistics
 CREATE TABLE IF NOT EXISTS daily_metrics (
@@ -35,9 +42,3 @@ CREATE TRIGGER trigger_daily_metrics_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION update_daily_metrics_updated_at();
 
--- +goose Down
-DROP TRIGGER IF EXISTS trigger_daily_metrics_updated_at ON daily_metrics;
-DROP FUNCTION IF EXISTS update_daily_metrics_updated_at();
-DROP INDEX IF EXISTS idx_daily_metrics_created_at;
-DROP INDEX IF EXISTS idx_daily_metrics_date;
-DROP TABLE IF EXISTS daily_metrics;

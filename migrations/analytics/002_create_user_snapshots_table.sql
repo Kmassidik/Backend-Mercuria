@@ -1,3 +1,12 @@
+-- +goose Down
+DROP TRIGGER IF EXISTS trigger_user_snapshots_updated_at ON user_snapshots;
+DROP FUNCTION IF EXISTS update_user_snapshots_updated_at();
+DROP INDEX IF EXISTS idx_user_snapshots_last_transaction;
+DROP INDEX IF EXISTS idx_user_snapshots_user_date;
+DROP INDEX IF EXISTS idx_user_snapshots_date;
+DROP INDEX IF EXISTS idx_user_snapshots_user_id;
+DROP TABLE IF EXISTS user_snapshots;
+
 -- +goose Up
 -- Create user_snapshots table for per-user aggregated statistics
 CREATE TABLE IF NOT EXISTS user_snapshots (
@@ -42,11 +51,3 @@ CREATE TRIGGER trigger_user_snapshots_updated_at
     FOR EACH ROW
     EXECUTE FUNCTION update_user_snapshots_updated_at();
 
--- +goose Down
-DROP TRIGGER IF EXISTS trigger_user_snapshots_updated_at ON user_snapshots;
-DROP FUNCTION IF EXISTS update_user_snapshots_updated_at();
-DROP INDEX IF EXISTS idx_user_snapshots_last_transaction;
-DROP INDEX IF EXISTS idx_user_snapshots_user_date;
-DROP INDEX IF EXISTS idx_user_snapshots_date;
-DROP INDEX IF EXISTS idx_user_snapshots_user_id;
-DROP TABLE IF EXISTS user_snapshots;

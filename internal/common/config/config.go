@@ -68,10 +68,6 @@ func getDefaultPort(serviceName string) string {
 }
 
 func Load(serviceName string) (*Config, error) {
-	// Priority order for port configuration:
-	// 1. SERVICE_PORT (e.g., AUTH_PORT=8080)
-	// 2. Generic PORT env var
-	// 3. Service-specific default from PRD
 	
 	servicePortEnv := fmt.Sprintf("%s_PORT", strings.ToUpper(serviceName))
 	defaultPort := getDefaultPort(serviceName)
@@ -87,7 +83,7 @@ func Load(serviceName string) (*Config, error) {
 			Port:            getEnv("DB_PORT", "5432"),
 			User:            getEnv("DB_USER", "postgres"),
 			Password:        getEnv("DB_PASSWORD", "postgres"),
-			DBName:          getEnv("DB_NAME", serviceName),
+			DBName: 		 getEnv("DB_NAME", fmt.Sprintf("mercuria_%s", serviceName)),
 			MaxOpenConns:    getEnvAsInt("DB_MAX_OPEN_CONNS", 25),
 			MaxIdleConns:    getEnvAsInt("DB_MAX_IDLE_CONNS", 5),
 			ConnMaxLifetime: getEnvAsDuration("DB_CONN_MAX_LIFETIME", 5*time.Minute),
