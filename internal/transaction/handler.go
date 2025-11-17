@@ -48,7 +48,16 @@ func (h *Handler) CreateTransaction(w http.ResponseWriter, r *http.Request) {
 	// TODO: Verify user owns from_wallet_id (wallet service integration)
 	_ = userID
 
-	txn, err := h.service.CreateP2PTransfer(r.Context(), &req)
+	// IMPORTANT: Get auth header and add to context for inter-service calls
+	ctx := r.Context()
+	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+		h.logger.Infof("Found Authorization header in request: %s...", authHeader[:20])
+		ctx = SetAuthorizationInContext(ctx, authHeader)
+	} else {
+		h.logger.Warn("No Authorization header found in request!")
+	}
+
+	txn, err := h.service.CreateP2PTransfer(ctx, &req)
 	if err != nil {
 		h.logger.Errorf("Failed to create transfer: %v", err)
 		h.respondError(w, http.StatusBadRequest, err.Error())
@@ -76,7 +85,13 @@ func (h *Handler) CreateBatchTransaction(w http.ResponseWriter, r *http.Request)
 	// TODO: Verify user owns from_wallet_id
 	_ = userID
 
-	batch, txns, err := h.service.CreateBatchTransfer(r.Context(), &req)
+	// Add Authorization header to context for inter-service calls
+	ctx := r.Context()
+	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+		ctx = SetAuthorizationInContext(ctx, authHeader)
+	}
+
+	batch, txns, err := h.service.CreateBatchTransfer(ctx, &req)
 	if err != nil {
 		h.logger.Errorf("Failed to create batch transfer: %v", err)
 		h.respondError(w, http.StatusBadRequest, err.Error())
@@ -107,7 +122,13 @@ func (h *Handler) CreateScheduledTransaction(w http.ResponseWriter, r *http.Requ
 	// TODO: Verify user owns from_wallet_id
 	_ = userID
 
-	txn, err := h.service.CreateScheduledTransfer(r.Context(), &req)
+	// Add Authorization header to context for inter-service calls
+	ctx := r.Context()
+	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+		ctx = SetAuthorizationInContext(ctx, authHeader)
+	}
+
+	txn, err := h.service.CreateScheduledTransfer(ctx, &req)
 	if err != nil {
 		h.logger.Errorf("Failed to create scheduled transfer: %v", err)
 		h.respondError(w, http.StatusBadRequest, err.Error())
@@ -131,7 +152,13 @@ func (h *Handler) GetTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	txn, err := h.service.GetTransaction(r.Context(), txnID)
+	// Add Authorization header to context for inter-service calls
+	ctx := r.Context()
+	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+		ctx = SetAuthorizationInContext(ctx, authHeader)
+	}
+
+	txn, err := h.service.GetTransaction(ctx, txnID)
 	if err != nil {
 		h.logger.Errorf("Failed to get transaction: %v", err)
 		h.respondError(w, http.StatusNotFound, "transaction not found")
@@ -177,7 +204,13 @@ func (h *Handler) ListTransactions(w http.ResponseWriter, r *http.Request) {
 	// TODO: Verify user owns wallet
 	_ = userID
 
-	txns, err := h.service.ListTransactionsByWallet(r.Context(), walletID, limit, offset)
+	// Add Authorization header to context for inter-service calls
+	ctx := r.Context()
+	if authHeader := r.Header.Get("Authorization"); authHeader != "" {
+		ctx = SetAuthorizationInContext(ctx, authHeader)
+	}
+
+	txns, err := h.service.ListTransactionsByWallet(ctx, walletID, limit, offset)
 	if err != nil {
 		h.logger.Errorf("Failed to list transactions: %v", err)
 		h.respondError(w, http.StatusInternalServerError, "failed to list transactions")

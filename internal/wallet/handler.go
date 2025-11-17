@@ -18,6 +18,8 @@ type ServiceInterface interface {
 	Deposit(ctx context.Context, walletID string, req *DepositRequest) (*Wallet, error)
 	Withdraw(ctx context.Context, walletID string, req *WithdrawRequest) (*Wallet, error)
 	GetWalletEvents(ctx context.Context, walletID string, limit, offset int) ([]WalletEvent, error)
+	GetWalletsByUserID(ctx context.Context, userID string) ([]Wallet, error) // <- ADD THIS
+	Transfer(ctx context.Context, req *TransferRequest) error // <- ADD THIS
 }
 
 type Handler struct {
@@ -229,6 +231,27 @@ func (h *Handler) GetWalletEvents(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetMyWallets handles retrieving all wallets for authenticated user
+func (h *Handler) GetMyWallets(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserIDFromContext(r.Context())
+	if !ok {
+		h.respondError(w, http.StatusUnauthorized, "unauthorized")
+		return
+	}
+
+	wallets, err := h.service.GetWalletsByUserID(r.Context(), userID)
+	if err != nil {
+		h.logger.Errorf("Failed to get user wallets: %v", err)
+		h.respondError(w, http.StatusInternalServerError, "failed to get wallets")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, MyWalletsResponse{
+		Wallets: wallets,
+		Total:   len(wallets),
+	})
+}
+
 // Helper methods
 func (h *Handler) respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
@@ -238,4 +261,43 @@ func (h *Handler) respondJSON(w http.ResponseWriter, status int, data interface{
 
 func (h *Handler) respondError(w http.ResponseWriter, status int, message string) {
 	h.respondJSON(w, status, ErrorResponse{Error: message})
-} // <-- +FIX 4: Added the missing closing brace
+} 
+
+// Transfer handles internal wallet-to-wallet transfers
+func (h *Handler) Transfer(w http.ResponseWriter, r *http.Request) {
+	var req TransferRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.respondError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+
+	if err := h.service.Transfer(r.Context(), &req); err != nil {
+		h.logger.Errorf("Transfer failed: %v", err)
+		h.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]string{
+		"status":  "success",
+		"message": "transfer completed",
+	})
+}
+
+// GetWalletInternal - NO ownership check (for service-to-service calls)
+func (h *Handler) GetWalletInternal(w http.ResponseWriter, r *http.Request) {
+	walletID := r.PathValue("id")
+	if walletID == "" {
+		h.respondError(w, http.StatusBadRequest, "wallet ID is required")
+		return
+	}
+
+	wallet, err := h.service.GetWallet(r.Context(), walletID)
+	if err != nil {
+		h.logger.Errorf("Failed to get wallet: %v", err)
+		h.respondError(w, http.StatusNotFound, "wallet not found")
+		return
+	}
+
+	// NO ownership check - internal use only
+	h.respondJSON(w, http.StatusOK, WalletResponse{Wallet: wallet})
+}

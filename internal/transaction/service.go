@@ -1,10 +1,15 @@
 package transaction
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"io"
 	"math/big"
+	"net/http"
+	"os"
 	"time"
 
 	"github.com/kmassidik/mercuria/internal/common/db"
@@ -15,12 +20,14 @@ import (
 )
 
 type Service struct {
-	repo       *Repository
-	outboxRepo *outbox.Repository
-	redis      *redis.Client
-	producer   *kafka.Producer
-	db         *db.DB
-	logger     *logger.Logger
+	repo          *Repository
+	outboxRepo    *outbox.Repository
+	redis         *redis.Client
+	producer      *kafka.Producer
+	db            *db.DB
+	logger        *logger.Logger
+	walletBaseURL string
+	httpClient    *http.Client
 }
 
 func NewService(
@@ -31,278 +38,368 @@ func NewService(
 	database *db.DB,
 	log *logger.Logger,
 ) *Service {
+	// Use environment variable or default to localhost (services run on host, not Docker)
+	walletServiceURL := "http://localhost:8081"
+	if url := os.Getenv("WALLET_SERVICE_URL"); url != "" {
+		walletServiceURL = url
+	}
+
 	return &Service{
-		repo:       repo,
-		outboxRepo: outboxRepo,
-		redis:      redisClient,
-		producer:   producer,
-		db:         database,
-		logger:     log,
+		repo:          repo,
+		outboxRepo:    outboxRepo,
+		redis:         redisClient,
+		producer:      producer,
+		db:            database,
+		logger:        log,
+		walletBaseURL: walletServiceURL,
+		httpClient: &http.Client{
+			Timeout: 10 * time.Second,
+		},
 	}
 }
 
+// HTTP Client functions for Wallet Service communication
+
+// getWalletFromService calls Wallet Service API to get wallet info
+func (s *Service) getWalletFromService(ctx context.Context, walletID string) (*WalletInfo, error) {
+	url := fmt.Sprintf("%s/api/v1/internal/wallets/%s", s.walletBaseURL, walletID)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// Extract and forward authorization header from context if present
+	if token, ok := GetAuthorizationFromContext(ctx); ok {
+		req.Header.Set("Authorization", token)
+		s.logger.Infof("Forwarding auth token to wallet service (GET): %s...", token[:20])
+	} else {
+		s.logger.Warn("No authorization token found in context for wallet service call")
+	}
+
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("wallet service unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, fmt.Errorf("wallet not found")
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("wallet service error: %s", string(body))
+	}
+
+	var response struct {
+		Wallet *WalletInfo `json:"wallet"`
+	}
+
+	if err := json.NewDecoder(resp.Body).Decode(&response); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %w", err)
+	}
+
+	if response.Wallet.Status != "active" {
+		return nil, fmt.Errorf("wallet is not active")
+	}
+
+	return response.Wallet, nil
+}
+
+// executeWalletTransfer calls Wallet Service to execute the actual transfer
+func (s *Service) executeWalletTransfer(ctx context.Context, req *WalletTransferRequest) error {
+	url := fmt.Sprintf("%s/api/v1/wallets/transfer", s.walletBaseURL)
+
+	body, err := json.Marshal(req)
+	if err != nil {
+		return fmt.Errorf("failed to marshal request: %w", err)
+	}
+
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(body))
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Extract and forward authorization header from context if present
+	if token, ok := GetAuthorizationFromContext(ctx); ok {
+		httpReq.Header.Set("Authorization", token)
+	}
+
+	resp, err := s.httpClient.Do(httpReq)
+	if err != nil {
+		return fmt.Errorf("wallet service unreachable: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("transfer failed: %s", string(bodyBytes))
+	}
+
+	return nil
+}
+
+// WalletTransferRequest for calling Wallet Service transfer API
+type WalletTransferRequest struct {
+	FromWalletID   string `json:"from_wallet_id"`
+	ToWalletID     string `json:"to_wallet_id"`
+	Amount         string `json:"amount"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+type WalletInfo struct {
+	ID       string `json:"id"`
+	UserID   string `json:"user_id"`
+	Currency string `json:"currency"`
+	Balance  string `json:"balance"`
+	Status   string `json:"status"`
+}
+
 func (s *Service) CreateP2PTransfer(ctx context.Context, req *CreateTransactionRequest) (*Transaction, error) {
-    // 1. Validate request
-    if err := ValidateCreateTransactionRequest(req); err != nil {
-        return nil, fmt.Errorf("validation failed: %w", err)
-    }
+	// 1. Validate request
+	if err := ValidateCreateTransactionRequest(req); err != nil {
+		return nil, fmt.Errorf("validation failed: %w", err)
+	}
 
-    // 2. Check idempotency (Redis)
-    exists, err := s.redis.CheckIdempotency(ctx, req.IdempotencyKey)
-    if err != nil {
-        return nil, fmt.Errorf("idempotency check failed: %w", err)
-    }
-    if exists {
-        return nil, fmt.Errorf("duplicate request: idempotency key already used")
-    }
+	// 2. Check idempotency (Redis)
+	exists, err := s.redis.CheckIdempotency(ctx, req.IdempotencyKey)
+	if err != nil {
+		return nil, fmt.Errorf("idempotency check failed: %w", err)
+	}
+	if exists {
+		return nil, fmt.Errorf("duplicate request: idempotency key already used")
+	}
 
-    // 3. Execute transfer in transaction
-    var completedTxn *Transaction
-    err = s.db.WithTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
-        // 3a. Get and validate wallets
-        fromWallet, err := s.getWalletForUpdate(ctx, tx, req.FromWalletID)
-        if err != nil {
-            return fmt.Errorf("source wallet error: %w", err)
-        }
+	// 3. Get wallet info from Wallet Service (not from local DB)
+	fromWallet, err := s.getWalletFromService(ctx, req.FromWalletID)
+	if err != nil {
+		return nil, fmt.Errorf("source wallet error: %w", err)
+	}
 
-        toWallet, err := s.getWalletForUpdate(ctx, tx, req.ToWalletID)
-        if err != nil {
-            return fmt.Errorf("destination wallet error: %w", err)
-        }
+	toWallet, err := s.getWalletFromService(ctx, req.ToWalletID)
+	if err != nil {
+		return nil, fmt.Errorf("destination wallet error: %w", err)
+	}
 
-        // 3b. Validate currencies match
-        if fromWallet.Currency != toWallet.Currency {
-            return fmt.Errorf("currency mismatch: %s != %s", fromWallet.Currency, toWallet.Currency)
-        }
+	// 4. Validate currencies match
+	if fromWallet.Currency != toWallet.Currency {
+		return nil, fmt.Errorf("currency mismatch: %s != %s", fromWallet.Currency, toWallet.Currency)
+	}
 
-        // 3c. Check sufficient balance
-        if !hasSufficientBalance(fromWallet.Balance, req.Amount) {
-            return fmt.Errorf("insufficient balance")
-        }
+	// 5. Check sufficient balance
+	if !hasSufficientBalance(fromWallet.Balance, req.Amount) {
+		return nil, fmt.Errorf("insufficient balance")
+	}
 
-        // 3d. Calculate new balances
-        newFromBalance, err := subtractAmounts(fromWallet.Balance, req.Amount)
-        if err != nil {
-            return fmt.Errorf("failed to calculate from balance: %w", err)
-        }
+	// 6. Execute transfer via Wallet Service API (not local DB update)
+	transferReq := WalletTransferRequest{
+		FromWalletID:   req.FromWalletID,
+		ToWalletID:     req.ToWalletID,
+		Amount:         req.Amount,
+		IdempotencyKey: req.IdempotencyKey,
+	}
 
-        newToBalance, err := addAmounts(toWallet.Balance, req.Amount)
-        if err != nil {
-            return fmt.Errorf("failed to calculate to balance: %w", err)
-        }
+	if err := s.executeWalletTransfer(ctx, &transferReq); err != nil {
+		return nil, fmt.Errorf("wallet transfer failed: %w", err)
+	}
 
-        // 3e. Update balances
-        if err := s.updateWalletBalance(ctx, tx, req.FromWalletID, newFromBalance); err != nil {
-            return fmt.Errorf("failed to update source wallet: %w", err)
-        }
+	// 7. Create transaction record in local DB
+	var completedTxn *Transaction
+	err = s.db.WithTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		txn := &Transaction{
+			FromWalletID:   req.FromWalletID,
+			ToWalletID:     req.ToWalletID,
+			Amount:         req.Amount,
+			Currency:       fromWallet.Currency,
+			Type:           TypeP2P,
+			Status:         StatusCompleted,
+			Description:    req.Description,
+			IdempotencyKey: req.IdempotencyKey,
+		}
 
-        if err := s.updateWalletBalance(ctx, tx, req.ToWalletID, newToBalance); err != nil {
-            return fmt.Errorf("failed to update destination wallet: %w", err)
-        }
+		createdTxn, err := s.repo.CreateTransactionTx(ctx, tx, txn)
+		if err != nil {
+			return fmt.Errorf("failed to create transaction: %w", err)
+		}
+		completedTxn = createdTxn
 
-        // 3f. Create transaction record
-        txn := &Transaction{
-            FromWalletID:   req.FromWalletID,
-            ToWalletID:     req.ToWalletID,
-            Amount:         req.Amount,
-            Currency:       fromWallet.Currency,
-            Type:           TypeP2P,
-            Status:         StatusCompleted,
-            Description:    req.Description,
-            IdempotencyKey: req.IdempotencyKey,
-        }
+		// 8. Save outbox event
+		event := &outbox.OutboxEvent{
+			AggregateID: createdTxn.ID,
+			EventType:   "transaction.completed",
+			Topic:       "transaction.completed",
+			Payload: map[string]interface{}{
+				"transaction_id": createdTxn.ID,
+				"from_wallet_id": req.FromWalletID,
+				"to_wallet_id":   req.ToWalletID,
+				"amount":         req.Amount,
+				"currency":       fromWallet.Currency,
+				"type":           TypeP2P,
+				"completed_at":   time.Now(),
+			},
+		}
 
-        createdTxn, err := s.repo.CreateTransactionTx(ctx, tx, txn)
-        if err != nil {
-            return fmt.Errorf("failed to create transaction: %w", err)
-        }
-        completedTxn = createdTxn
+		if err := s.outboxRepo.SaveEvent(ctx, tx, event); err != nil {
+			return fmt.Errorf("failed to save outbox event: %w", err)
+		}
 
-        // 3g. Save outbox event
-        event := &outbox.OutboxEvent{
-            AggregateID: createdTxn.ID,
-            EventType:   "transaction.completed",
-            Topic:       "transaction.completed",
-            Payload: map[string]interface{}{
-                "transaction_id": createdTxn.ID,
-                "from_wallet_id": req.FromWalletID,
-                "to_wallet_id":   req.ToWalletID,
-                "amount":         req.Amount,
-                "currency":       fromWallet.Currency,
-                "type":           TypeP2P,
-                "completed_at":   time.Now(),
-            },
-        }
+		return nil
+	})
 
-        if err := s.outboxRepo.SaveEvent(ctx, tx, event); err != nil {
-            return fmt.Errorf("failed to save outbox event: %w", err)
-        }
+	if err != nil {
+		s.logger.Errorf("Transfer failed: %v", err)
+		return nil, err
+	}
 
-        return nil
-    })
+	// 9. Set idempotency key (after successful commit)
+	if err := s.redis.SetIdempotency(ctx, req.IdempotencyKey, 30*time.Minute); err != nil {
+		s.logger.Warnf("Failed to set idempotency key: %v", err)
+	}
 
-    if err != nil {
-        s.logger.Errorf("Transfer failed: %v", err)
-        return nil, err
-    }
-
-    // 4. Set idempotency key (after successful commit)
-    if err := s.redis.SetIdempotency(ctx, req.IdempotencyKey, 30*time.Minute); err != nil {
-        s.logger.Warnf("Failed to set idempotency key: %v", err)
-    }
-
-    s.logger.Infof("P2P transfer completed: %s", completedTxn.ID)
-    return completedTxn, nil
+	s.logger.Infof("P2P transfer completed: %s", completedTxn.ID)
+	return completedTxn, nil
 }
 
 func (s *Service) CreateBatchTransfer(ctx context.Context, req *CreateBatchTransactionRequest) (*BatchTransaction, []Transaction, error) {
-    // 1. Validate request
-    if err := ValidateCreateBatchTransactionRequest(req); err != nil {
-        return nil, nil, fmt.Errorf("validation failed: %w", err)
-    }
+	// 1. Validate request
+	if err := ValidateCreateBatchTransactionRequest(req); err != nil {
+		return nil, nil, fmt.Errorf("validation failed: %w", err)
+	}
 
-    // 2. Check idempotency
-    exists, err := s.redis.CheckIdempotency(ctx, req.IdempotencyKey)
-    if err != nil {
-        return nil, nil, fmt.Errorf("idempotency check failed: %w", err)
-    }
-    if exists {
-        return nil, nil, fmt.Errorf("duplicate request: idempotency key already used")
-    }
+	// 2. Check idempotency
+	exists, err := s.redis.CheckIdempotency(ctx, req.IdempotencyKey)
+	if err != nil {
+		return nil, nil, fmt.Errorf("idempotency check failed: %w", err)
+	}
+	if exists {
+		return nil, nil, fmt.Errorf("duplicate request: idempotency key already used")
+	}
 
-    // 3. Calculate total amount
-    totalAmount, err := CalculateBatchTotal(req.Transfers)
-    if err != nil {
-        return nil, nil, fmt.Errorf("failed to calculate total: %w", err)
-    }
+	// 3. Calculate total amount
+	totalAmount, err := CalculateBatchTotal(req.Transfers)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to calculate total: %w", err)
+	}
 
-    // 4. Execute batch in transaction
-    var batch *BatchTransaction
-    var transactions []Transaction
+	// 4. Get source wallet from Wallet Service
+	fromWallet, err := s.getWalletFromService(ctx, req.FromWalletID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("source wallet error: %w", err)
+	}
 
-    err = s.db.WithTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
-        // 4a. Get source wallet
-        fromWallet, err := s.getWalletForUpdate(ctx, tx, req.FromWalletID)
-        if err != nil {
-            return fmt.Errorf("source wallet error: %w", err)
-        }
+	// 5. Check sufficient balance for total
+	if !hasSufficientBalance(fromWallet.Balance, totalAmount) {
+		return nil, nil, fmt.Errorf("insufficient balance for batch (need %s, have %s)", totalAmount, fromWallet.Balance)
+	}
 
-        // 4b. Check sufficient balance for total
-        if !hasSufficientBalance(fromWallet.Balance, totalAmount) {
-            return fmt.Errorf("insufficient balance for batch (need %s, have %s)", totalAmount, fromWallet.Balance)
-        }
+	// 6. Execute each transfer via Wallet Service
+	var transactions []Transaction
+	var batch *BatchTransaction
 
-        // 4c. Create batch record
-        batchTxn := &BatchTransaction{
-            FromWalletID:   req.FromWalletID,
-            TotalAmount:    totalAmount,
-            Currency:       fromWallet.Currency,
-            Status:         StatusPending,
-            IdempotencyKey: req.IdempotencyKey,
-            Transfers:      req.Transfers,
-        }
+	err = s.db.WithTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		// Create batch record
+		batchTxn := &BatchTransaction{
+			FromWalletID:   req.FromWalletID,
+			TotalAmount:    totalAmount,
+			Currency:       fromWallet.Currency,
+			Status:         StatusPending,
+			IdempotencyKey: req.IdempotencyKey,
+			Transfers:      req.Transfers,
+		}
 
-        createdBatch, err := s.repo.CreateBatchTransactionTx(ctx, tx, batchTxn)
-        if err != nil {
-            return fmt.Errorf("failed to create batch: %w", err)
-        }
-        batch = createdBatch
+		createdBatch, err := s.repo.CreateBatchTransactionTx(ctx, tx, batchTxn)
+		if err != nil {
+			return fmt.Errorf("failed to create batch: %w", err)
+		}
+		batch = createdBatch
 
-        // 4d. Process each transfer
-        currentBalance := fromWallet.Balance
-        for i, transfer := range req.Transfers {
-            // Get recipient wallet
-            toWallet, err := s.getWalletForUpdate(ctx, tx, transfer.ToWalletID)
-            if err != nil {
-                return fmt.Errorf("transfer[%d] recipient error: %w", i, err)
-            }
+		// Process each transfer
+		for i, transfer := range req.Transfers {
+			// Validate recipient wallet exists
+			toWallet, err := s.getWalletFromService(ctx, transfer.ToWalletID)
+			if err != nil {
+				return fmt.Errorf("transfer[%d] recipient error: %w", i, err)
+			}
 
-            // Validate currency
-            if fromWallet.Currency != toWallet.Currency {
-                return fmt.Errorf("transfer[%d] currency mismatch", i)
-            }
+			// Validate currency
+			if fromWallet.Currency != toWallet.Currency {
+				return fmt.Errorf("transfer[%d] currency mismatch", i)
+			}
 
-            // Calculate new balances
-            newFromBalance, err := subtractAmounts(currentBalance, transfer.Amount)
-            if err != nil {
-                return fmt.Errorf("transfer[%d] balance calculation failed: %w", i, err)
-            }
-            currentBalance = newFromBalance
+			// Execute individual transfer
+			transferReq := WalletTransferRequest{
+				FromWalletID:   req.FromWalletID,
+				ToWalletID:     transfer.ToWalletID,
+				Amount:         transfer.Amount,
+				IdempotencyKey: fmt.Sprintf("%s-%d", req.IdempotencyKey, i),
+			}
 
-            newToBalance, err := addAmounts(toWallet.Balance, transfer.Amount)
-            if err != nil {
-                return fmt.Errorf("transfer[%d] to balance calculation failed: %w", i, err)
-            }
+			if err := s.executeWalletTransfer(ctx, &transferReq); err != nil {
+				return fmt.Errorf("transfer[%d] execution failed: %w", i, err)
+			}
 
-            // Update recipient balance
-            if err := s.updateWalletBalance(ctx, tx, transfer.ToWalletID, newToBalance); err != nil {
-                return fmt.Errorf("transfer[%d] update recipient failed: %w", i, err)
-            }
+			// Create transaction record
+			txn := &Transaction{
+				FromWalletID:   req.FromWalletID,
+				ToWalletID:     transfer.ToWalletID,
+				Amount:         transfer.Amount,
+				Currency:       fromWallet.Currency,
+				Type:           TypeBatch,
+				Status:         StatusCompleted,
+				Description:    transfer.Description,
+				IdempotencyKey: fmt.Sprintf("%s-%d", req.IdempotencyKey, i),
+			}
 
-            // Create individual transaction record
-            txn := &Transaction{
-                FromWalletID:   req.FromWalletID,
-                ToWalletID:     transfer.ToWalletID,
-                Amount:         transfer.Amount,
-                Currency:       fromWallet.Currency,
-                Type:           TypeBatch,
-                Status:         StatusCompleted,
-                Description:    fmt.Sprintf("Batch transfer [%d/%d]: %s", i+1, len(req.Transfers), transfer.Description),
-                IdempotencyKey: fmt.Sprintf("%s-item-%d", req.IdempotencyKey, i),
-            }
+			createdTxn, err := s.repo.CreateTransactionTx(ctx, tx, txn)
+			if err != nil {
+				return fmt.Errorf("transfer[%d] record creation failed: %w", i, err)
+			}
+			transactions = append(transactions, *createdTxn)
+		}
 
-            createdTxn, err := s.repo.CreateTransactionTx(ctx, tx, txn)
-            if err != nil {
-                return fmt.Errorf("transfer[%d] create transaction failed: %w", i, err)
-            }
-            transactions = append(transactions, *createdTxn)
-        }
+		// Update batch status to completed
+		if err := s.repo.UpdateBatchTransactionStatus(ctx, batch.ID, StatusCompleted); err != nil {
+			return fmt.Errorf("failed to update batch status: %w", err)
+		}
+		batch.Status = StatusCompleted
 
-        // 4e. Update source wallet with final balance
-        if err := s.updateWalletBalance(ctx, tx, req.FromWalletID, currentBalance); err != nil {
-            return fmt.Errorf("failed to update source wallet: %w", err)
-        }
+		// Save outbox event
+		event := &outbox.OutboxEvent{
+			AggregateID: batch.ID,
+			EventType:   "batch.completed",
+			Topic:       "transaction.completed",
+			Payload: map[string]interface{}{
+				"batch_id":       batch.ID,
+				"from_wallet_id": req.FromWalletID,
+				"total_amount":   totalAmount,
+				"count":          len(req.Transfers),
+				"completed_at":   time.Now(),
+			},
+		}
 
-        // 4f. Update batch status
-        batch.Status = StatusCompleted
+		if err := s.outboxRepo.SaveEvent(ctx, tx, event); err != nil {
+			return fmt.Errorf("failed to save outbox event: %w", err)
+		}
 
-        // 4g. Save outbox event
-        event := &outbox.OutboxEvent{
-            AggregateID: batch.ID,
-            EventType:   "batch.completed",
-            Topic:       "transaction.completed",
-            Payload: map[string]interface{}{
-                "batch_id":      batch.ID,
-                "from_wallet_id": req.FromWalletID,
-                "total_amount":  totalAmount,
-                "count":         len(req.Transfers),
-                "completed_at":  time.Now(),
-            },
-        }
+		return nil
+	})
 
-        if err := s.outboxRepo.SaveEvent(ctx, tx, event); err != nil {
-            return fmt.Errorf("failed to save outbox event: %w", err)
-        }
+	if err != nil {
+		s.logger.Errorf("Batch transfer failed: %v", err)
+		return nil, nil, err
+	}
 
-        return nil
-    })
+	// Set idempotency key
+	if err := s.redis.SetIdempotency(ctx, req.IdempotencyKey, 30*time.Minute); err != nil {
+		s.logger.Warnf("Failed to set idempotency key: %v", err)
+	}
 
-    if err != nil {
-        s.logger.Errorf("Batch transfer failed: %v", err)
-        return nil, nil, err
-    }
-
-    // 5. Set idempotency key
-    if err := s.redis.SetIdempotency(ctx, req.IdempotencyKey, 30*time.Minute); err != nil {
-        s.logger.Warnf("Failed to set idempotency key: %v", err)
-    }
-
-    s.logger.Infof("Batch transfer completed: %s (%d transfers)", batch.ID, len(transactions))
-    return batch, transactions, nil
+	s.logger.Infof("Batch transfer completed: %s (%d transfers)", batch.ID, len(transactions))
+	return batch, transactions, nil
 }
 
-// CreateScheduledTransfer creates a future-dated transfer
-// NOTE: Transfer is created but not executed until scheduled time
 func (s *Service) CreateScheduledTransfer(ctx context.Context, req *CreateScheduledTransactionRequest) (*Transaction, error) {
 	// 1. Validate request
 	if err := ValidateCreateScheduledTransactionRequest(req); err != nil {
@@ -319,12 +416,12 @@ func (s *Service) CreateScheduledTransfer(ctx context.Context, req *CreateSchedu
 	}
 
 	// 3. Verify wallets exist and currencies match
-	fromWallet, err := s.getWallet(ctx, req.FromWalletID)
+	fromWallet, err := s.getWalletFromService(ctx, req.FromWalletID)
 	if err != nil {
 		return nil, fmt.Errorf("source wallet error: %w", err)
 	}
 
-	toWallet, err := s.getWallet(ctx, req.ToWalletID)
+	toWallet, err := s.getWalletFromService(ctx, req.ToWalletID)
 	if err != nil {
 		return nil, fmt.Errorf("destination wallet error: %w", err)
 	}
@@ -393,127 +490,57 @@ func (s *Service) ProcessScheduledTransfers(ctx context.Context) (int, error) {
 }
 
 func (s *Service) executeScheduledTransfer(ctx context.Context, txn *Transaction) error {
-    return s.db.WithTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
-        // Get wallets
-        fromWallet, err := s.getWalletForUpdate(ctx, tx, txn.FromWalletID)
-        if err != nil {
-            return err
-        }
-
-        toWallet, err := s.getWalletForUpdate(ctx, tx, txn.ToWalletID)
-        if err != nil {
-            return err
-        }
-
-        // Check balance
-        if !hasSufficientBalance(fromWallet.Balance, txn.Amount) {
-            return fmt.Errorf("insufficient balance")
-        }
-
-        // Calculate new balances
-        newFromBalance, _ := subtractAmounts(fromWallet.Balance, txn.Amount)
-        newToBalance, _ := addAmounts(toWallet.Balance, txn.Amount)
-
-        // Update balances
-        s.updateWalletBalance(ctx, tx, txn.FromWalletID, newFromBalance)
-        s.updateWalletBalance(ctx, tx, txn.ToWalletID, newToBalance)
-
-        // Update transaction status
-        s.repo.UpdateTransactionStatusTx(ctx, tx, txn.ID, StatusCompleted)
-
-        // Save outbox event
-        event := &outbox.OutboxEvent{
-            AggregateID: txn.ID,
-            EventType:   "transaction.completed",
-            Topic:       "transaction.completed",
-            Payload: map[string]interface{}{
-                "transaction_id": txn.ID,
-                "from_wallet_id": txn.FromWalletID,
-                "to_wallet_id":   txn.ToWalletID,
-                "amount":         txn.Amount,
-                "type":           TypeScheduled,
-                "completed_at":   time.Now(),
-            },
-        }
-        return s.outboxRepo.SaveEvent(ctx, tx, event)
-    })
-}
-
-func (s *Service) getWallet(ctx context.Context, id string) (*WalletInfo, error) {
-	var wallet WalletInfo
-	query := `SELECT id, user_id, currency, balance, status FROM wallets WHERE id = $1`
-	err := s.db.QueryRowContext(ctx, query, id).Scan(
-		&wallet.ID, &wallet.UserID, &wallet.Currency, &wallet.Balance, &wallet.Status,
-	)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("wallet not found")
-	}
+	// 1. Get wallet info
+	fromWallet, err := s.getWalletFromService(ctx, txn.FromWalletID)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("source wallet error: %w", err)
 	}
-	return &wallet, nil
-}
 
-// getWalletForUpdate retrieves wallet with row lock
-func (s *Service) getWalletForUpdate(ctx context.Context, tx *sql.Tx, id string) (*WalletInfo, error) {
-	var wallet WalletInfo
-	query := `SELECT id, user_id, currency, balance, status FROM wallets WHERE id = $1 FOR UPDATE`
-	err := tx.QueryRowContext(ctx, query, id).Scan(
-		&wallet.ID, &wallet.UserID, &wallet.Currency, &wallet.Balance, &wallet.Status,
-	)
-	if err == sql.ErrNoRows {
-		return nil, fmt.Errorf("wallet not found")
-	}
+	_, err = s.getWalletFromService(ctx, txn.ToWalletID)
 	if err != nil {
-		return nil, err
+		return fmt.Errorf("destination wallet error: %w", err)
 	}
-	if wallet.Status != "active" {
-		return nil, fmt.Errorf("wallet is not active")
-	}
-	return &wallet, nil
-}
 
-// updateWalletBalance updates wallet balance within transaction
-func (s *Service) updateWalletBalance(ctx context.Context, tx *sql.Tx, id, newBalance string) error {
-	query := `UPDATE wallets SET balance = $1, updated_at = CURRENT_TIMESTAMP WHERE id = $2`
-	_, err := tx.ExecContext(ctx, query, newBalance, id)
-	return err
-}
-
-type WalletInfo struct {
-	ID       string
-	UserID   string
-	Currency string
-	Balance  string
-	Status   string
-}
-
-// Decimal arithmetic helpers
-
-func addAmounts(a, b string) (string, error) {
-	aVal := new(big.Float)
-	bVal := new(big.Float)
-	if _, ok := aVal.SetString(a); !ok {
-		return "", fmt.Errorf("invalid amount: %s", a)
+	// 2. Check balance
+	if !hasSufficientBalance(fromWallet.Balance, txn.Amount) {
+		return fmt.Errorf("insufficient balance")
 	}
-	if _, ok := bVal.SetString(b); !ok {
-		return "", fmt.Errorf("invalid amount: %s", b)
-	}
-	result := new(big.Float).Add(aVal, bVal)
-	return result.Text('f', 4), nil
-}
 
-func subtractAmounts(a, b string) (string, error) {
-	aVal := new(big.Float)
-	bVal := new(big.Float)
-	if _, ok := aVal.SetString(a); !ok {
-		return "", fmt.Errorf("invalid amount: %s", a)
+	// 3. Execute transfer via Wallet Service
+	transferReq := WalletTransferRequest{
+		FromWalletID:   txn.FromWalletID,
+		ToWalletID:     txn.ToWalletID,
+		Amount:         txn.Amount,
+		IdempotencyKey: fmt.Sprintf("scheduled-%s", txn.ID),
 	}
-	if _, ok := bVal.SetString(b); !ok {
-		return "", fmt.Errorf("invalid amount: %s", b)
+
+	if err := s.executeWalletTransfer(ctx, &transferReq); err != nil {
+		return fmt.Errorf("wallet transfer failed: %w", err)
 	}
-	result := new(big.Float).Sub(aVal, bVal)
-	return result.Text('f', 4), nil
+
+	// 4. Update transaction status in DB
+	return s.db.WithTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+		// Update transaction status
+		if err := s.repo.UpdateTransactionStatusTx(ctx, tx, txn.ID, StatusCompleted); err != nil {
+			return err
+		}
+
+		// Save outbox event
+		event := &outbox.OutboxEvent{
+			AggregateID: txn.ID,
+			EventType:   "transaction.completed",
+			Topic:       "transaction.completed",
+			Payload: map[string]interface{}{
+				"transaction_id": txn.ID,
+				"from_wallet_id": txn.FromWalletID,
+				"to_wallet_id":   txn.ToWalletID,
+				"amount":         txn.Amount,
+				"type":           TypeScheduled,
+				"completed_at":   time.Now(),
+			},
+		}
+		return s.outboxRepo.SaveEvent(ctx, tx, event)
+	})
 }
 
 func hasSufficientBalance(balance, amount string) bool {
@@ -534,7 +561,7 @@ func (s *Service) GetTransaction(ctx context.Context, id string) (*Transaction, 
 	}
 
 	// NOTE: You would perform the "Verify user owns one of the wallets in transaction" TODO here
-	
+
 	return txn, nil
 }
 
@@ -547,6 +574,6 @@ func (s *Service) ListTransactionsByWallet(ctx context.Context, walletID string,
 	if err != nil {
 		return nil, err
 	}
-	
+
 	return txns, nil
 }

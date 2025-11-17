@@ -1,8 +1,28 @@
 package transaction
 
 import (
+	"context"
 	"time"
 )
+
+// contextKey is a custom type for context keys to avoid collisions
+type contextKey string
+
+const (
+	// AuthorizationContextKey is used to pass JWT token between handler and service
+	AuthorizationContextKey contextKey = "authorization"
+)
+
+// SetAuthorizationInContext adds the Authorization header to context
+func SetAuthorizationInContext(ctx context.Context, token string) context.Context {
+	return context.WithValue(ctx, AuthorizationContextKey, token)
+}
+
+// GetAuthorizationFromContext retrieves the Authorization header from context
+func GetAuthorizationFromContext(ctx context.Context) (string, bool) {
+	token, ok := ctx.Value(AuthorizationContextKey).(string)
+	return token, ok
+}
 
 // Transaction represents a fund transfer between wallets
 // NOTE: This is the core entity for money movement in Mercuria

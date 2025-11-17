@@ -324,3 +324,39 @@ func (r *Repository) GetWalletTx(ctx context.Context, tx *sql.Tx, id string) (*W
 
     return wallet, nil
 }
+
+// GetWalletsByUserID retrieves all wallets for a user
+func (r *Repository) GetWalletsByUserID(ctx context.Context, userID string) ([]Wallet, error) {
+	query := `
+		SELECT id, user_id, currency, balance, status, created_at, updated_at
+		FROM wallets
+		WHERE user_id = $1
+		ORDER BY created_at DESC
+	`
+
+	rows, err := r.db.QueryContext(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get wallets: %w", err)
+	}
+	defer rows.Close()
+
+	var wallets []Wallet
+	for rows.Next() {
+		var wallet Wallet
+		err := rows.Scan(
+			&wallet.ID,
+			&wallet.UserID,
+			&wallet.Currency,
+			&wallet.Balance,
+			&wallet.Status,
+			&wallet.CreatedAt,
+			&wallet.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan wallet: %w", err)
+		}
+		wallets = append(wallets, wallet)
+	}
+
+	return wallets, nil
+}

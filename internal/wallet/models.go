@@ -25,6 +25,12 @@ type WalletEvent struct {
 	CreatedAt     time.Time              `json:"created_at"`
 }
 
+type MyWalletsResponse struct {
+	Wallets []Wallet `json:"wallets"`  
+	Total int `json:"total"`
+}
+
+
 const (
 	EventTypeCreated    = "wallet.created"
 	EventTypeDeposit    = "wallet.deposit"
@@ -85,4 +91,11 @@ type BalanceUpdatedEvent struct {
 	BalanceBefore string    `json:"balance_before"`
 	BalanceAfter  string    `json:"balance_after"`
 	Timestamp     time.Time `json:"timestamp"`
+}
+
+type TransferRequest struct {
+	FromWalletID   string `json:"from_wallet_id"`
+	ToWalletID     string `json:"to_wallet_id"`
+	Amount         string `json:"amount"`
+	IdempotencyKey string `json:"idempotency_key"`
 }
