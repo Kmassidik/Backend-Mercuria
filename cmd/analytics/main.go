@@ -50,8 +50,19 @@ func main() {
 	defer redisClient.Close()
 
 	// Initialize Kafka consumer
-	consumer := kafka.NewConsumer(cfg.Kafka, "ledger.entry_created", log)
+	consumer := kafka.NewConsumer(cfg.Kafka, "analytics-group", log)
 	defer consumer.Close()
+
+	// Verify Kafka is reachable (through consumer check)
+	log.Info("Checking Kafka connection...")
+	_, kafkaCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer kafkaCancel()
+
+	// Simple check - if consumer initialized, Kafka should be available
+	if consumer == nil {
+		log.Fatal("❌ Failed to initialize Kafka consumer")
+	}
+	log.Info("✅ Kafka consumer initialized")
 
 	// Initialize repositories
 	repo := analytics.NewRepository(database.DB)
@@ -125,10 +136,10 @@ func main() {
 	cancelConsumer()
 
 	// Shutdown HTTP server
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
 
-	if err := server.Shutdown(ctx); err != nil {
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 

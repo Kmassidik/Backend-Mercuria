@@ -360,7 +360,7 @@ func (s *Service) CreateBatchTransfer(ctx context.Context, req *CreateBatchTrans
 		}
 
 		// Update batch status to completed
-		if err := s.repo.UpdateBatchTransactionStatus(ctx, batch.ID, StatusCompleted); err != nil {
+		if err := s.repo.UpdateBatchTransactionStatusTx(ctx, tx, batch.ID, StatusCompleted); err != nil {
 			return fmt.Errorf("failed to update batch status: %w", err)
 		}
 		batch.Status = StatusCompleted

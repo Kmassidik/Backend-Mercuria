@@ -38,7 +38,7 @@ type Transaction struct {
 	IdempotencyKey    string    `json:"idempotency_key"`      // Prevents duplicate transfers
 	ScheduledAt       *time.Time `json:"scheduled_at"`        // For scheduled transfers
 	ProcessedAt       *time.Time `json:"processed_at"`        // When transfer completed
-	FailureReason     string    `json:"failure_reason"`       // Error message if failed
+	FailureReason  	  *string    `json:"failure_reason,omitempty"` // <- CHANGE THIS
 	CreatedAt         time.Time `json:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at"`
 }

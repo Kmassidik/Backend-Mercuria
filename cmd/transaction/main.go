@@ -54,6 +54,16 @@ func main() {
 	producer := kafka.NewProducer(cfg.Kafka, log)
 	defer producer.Close()
 
+	// Verify Kafka is reachable
+	log.Info("Checking Kafka connection...")
+	kafkaCtx, kafkaCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer kafkaCancel()
+
+	if err := producer.Ping(kafkaCtx); err != nil {
+		log.Fatalf("❌ Failed to connect to Kafka: %v", err)
+	}
+	log.Info("✅ Kafka is healthy")
+
 	// Initialize repositories
 	txnRepo := transaction.NewRepository(database, log)
 	outboxRepo := outbox.NewRepository(database.DB, log)
@@ -83,7 +93,6 @@ func main() {
 	})
 
 	// Start outbox publisher (background worker)
-	// NOTE: This publishes pending events to Kafka
 	outboxPublisher := outbox.NewPublisher(outboxRepo, producer, log, 5*time.Second)
 	publisherCtx, cancelPublisher := context.WithCancel(context.Background())
 	defer cancelPublisher()
@@ -92,7 +101,6 @@ func main() {
 	log.Info("Outbox publisher started")
 
 	// Start scheduled transfer worker (background worker)
-	// NOTE: This processes scheduled transfers that are due
 	go func() {
 		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
@@ -143,10 +151,10 @@ func main() {
 	cancelPublisher()
 
 	// Shutdown HTTP server
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
 
-	if err := server.Shutdown(ctx); err != nil {
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 

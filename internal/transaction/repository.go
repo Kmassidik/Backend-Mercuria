@@ -100,6 +100,8 @@ func (r *Repository) GetTransaction(ctx context.Context, id string) (*Transactio
 	`
 
 	txn := &Transaction{}
+	var failureReason sql.NullString // <- ADD THIS
+	
 	err := r.db.QueryRowContext(ctx, query, id).Scan(
 		&txn.ID,
 		&txn.FromWalletID,
@@ -112,7 +114,7 @@ func (r *Repository) GetTransaction(ctx context.Context, id string) (*Transactio
 		&txn.IdempotencyKey,
 		&txn.ScheduledAt,
 		&txn.ProcessedAt,
-		&txn.FailureReason,
+		&failureReason, // <- CHANGE THIS
 		&txn.CreatedAt,
 		&txn.UpdatedAt,
 	)
@@ -122,6 +124,11 @@ func (r *Repository) GetTransaction(ctx context.Context, id string) (*Transactio
 	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get transaction: %w", err)
+	}
+
+	// Convert sql.NullString to *string
+	if failureReason.Valid {
+		txn.FailureReason = &failureReason.String
 	}
 
 	return txn, nil
@@ -263,6 +270,8 @@ func (r *Repository) ListTransactionsByWallet(ctx context.Context, walletID stri
 	var transactions []Transaction
 	for rows.Next() {
 		var txn Transaction
+		var failureReason sql.NullString // <- ADD THIS
+		
 		err := rows.Scan(
 			&txn.ID,
 			&txn.FromWalletID,
@@ -275,13 +284,19 @@ func (r *Repository) ListTransactionsByWallet(ctx context.Context, walletID stri
 			&txn.IdempotencyKey,
 			&txn.ScheduledAt,
 			&txn.ProcessedAt,
-			&txn.FailureReason,
+			&failureReason, // <- CHANGE THIS
 			&txn.CreatedAt,
 			&txn.UpdatedAt,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to scan transaction: %w", err)
 		}
+		
+		// Convert sql.NullString to *string
+		if failureReason.Valid {
+			txn.FailureReason = &failureReason.String
+		}
+		
 		transactions = append(transactions, txn)
 	}
 
@@ -376,15 +391,15 @@ func (r *Repository) GetBatchTransaction(ctx context.Context, id string) (*Batch
 	return batch, nil
 }
 
-// UpdateBatchTransactionStatus updates batch status
-func (r *Repository) UpdateBatchTransactionStatus(ctx context.Context, id string, status string) error {
+// UpdateBatchTransactionStatusTx updates batch status within a transaction
+func (r *Repository) UpdateBatchTransactionStatusTx(ctx context.Context, tx *sql.Tx, id string, status string) error {
 	query := `
 		UPDATE batch_transactions
 		SET status = $1, updated_at = CURRENT_TIMESTAMP
 		WHERE id = $2
 	`
 
-	result, err := r.db.ExecContext(ctx, query, status, id)
+	result, err := tx.ExecContext(ctx, query, status, id)  // ← Use tx, not r.db
 	if err != nil {
 		return fmt.Errorf("failed to update batch status: %w", err)
 	}
@@ -394,6 +409,5 @@ func (r *Repository) UpdateBatchTransactionStatus(ctx context.Context, id string
 		return fmt.Errorf("batch transaction not found")
 	}
 
-	r.logger.Infof("Batch transaction %s status updated to %s", id, status)
 	return nil
 }
