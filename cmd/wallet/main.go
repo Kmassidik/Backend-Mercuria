@@ -54,6 +54,16 @@ func main() {
 	producer := kafka.NewProducer(cfg.Kafka, log)
 	defer producer.Close()
 
+	// Verify Kafka is reachable
+	log.Info("Checking Kafka connection...")
+	kafkaCtx, kafkaCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer kafkaCancel()
+
+	if err := producer.Ping(kafkaCtx); err != nil {
+		log.Fatalf("❌ Failed to connect to Kafka: %v", err)
+	}
+	log.Info("✅ Kafka is healthy")
+
 	// Initialize repositories
 	repo := wallet.NewRepository(database, log)
 	outboxRepo := outbox.NewRepository(database.DB, log)
@@ -115,10 +125,10 @@ func main() {
 	cancelPublisher()
 
 	// Shutdown HTTP server
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer shutdownCancel()
 
-	if err := server.Shutdown(ctx); err != nil {
+	if err := server.Shutdown(shutdownCtx); err != nil {
 		log.Fatalf("Server forced to shutdown: %v", err)
 	}
 
