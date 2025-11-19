@@ -15,6 +15,7 @@ import (
 	"github.com/kmassidik/mercuria/internal/common/db"
 	"github.com/kmassidik/mercuria/internal/common/kafka"
 	"github.com/kmassidik/mercuria/internal/common/logger"
+	"github.com/kmassidik/mercuria/internal/common/mtls"
 	"github.com/kmassidik/mercuria/internal/common/redis"
 	"github.com/kmassidik/mercuria/pkg/outbox"
 )
@@ -38,11 +39,33 @@ func NewService(
 	database *db.DB,
 	log *logger.Logger,
 ) *Service {
-	// Use environment variable or default to localhost (services run on host, not Docker)
+	// Use environment variable or default to localhost
 	walletServiceURL := "http://localhost:8081"
 	if url := os.Getenv("WALLET_SERVICE_URL"); url != "" {
 		walletServiceURL = url
 	}
+
+	// Load mTLS configuration
+	mtlsConfig := mtls.LoadFromEnv()
+	
+	// Create HTTP client
+	httpClient := &http.Client{
+		Timeout: 10 * time.Second,
+	}
+
+	// Configure mTLS for client if enabled
+    if mtlsConfig.Enabled {
+        tlsConfig, err := mtlsConfig.ClientTLSConfig()
+        if err != nil {
+            log.Fatalf("Failed to load mTLS client config: %v", err)
+        }
+        
+        httpClient.Transport = &http.Transport{
+            TLSClientConfig: tlsConfig,
+        }
+        
+        log.Info("✅ mTLS client configuration loaded")
+    }
 
 	return &Service{
 		repo:          repo,
@@ -52,15 +75,10 @@ func NewService(
 		db:            database,
 		logger:        log,
 		walletBaseURL: walletServiceURL,
-		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
-		},
+		 httpClient: httpClient,
 	}
 }
 
-// HTTP Client functions for Wallet Service communication
-
-// getWalletFromService calls Wallet Service API to get wallet info
 func (s *Service) getWalletFromService(ctx context.Context, walletID string) (*WalletInfo, error) {
 	url := fmt.Sprintf("%s/api/v1/internal/wallets/%s", s.walletBaseURL, walletID)
 
@@ -69,14 +87,9 @@ func (s *Service) getWalletFromService(ctx context.Context, walletID string) (*W
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Extract and forward authorization header from context if present
-	if token, ok := GetAuthorizationFromContext(ctx); ok {
-		req.Header.Set("Authorization", token)
-		s.logger.Infof("Forwarding auth token to wallet service (GET): %s...", token[:20])
-	} else {
-		s.logger.Warn("No authorization token found in context for wallet service call")
-	}
-
+	// Note: With mTLS, authentication happens at TLS layer
+	// No need to forward JWT for internal calls
+	
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("wallet service unreachable: %w", err)
@@ -109,7 +122,7 @@ func (s *Service) getWalletFromService(ctx context.Context, walletID string) (*W
 
 // executeWalletTransfer calls Wallet Service to execute the actual transfer
 func (s *Service) executeWalletTransfer(ctx context.Context, req *WalletTransferRequest) error {
-	url := fmt.Sprintf("%s/api/v1/wallets/transfer", s.walletBaseURL)
+	url := fmt.Sprintf("%s/api/v1/internal/wallets/transfer", s.walletBaseURL)
 
 	body, err := json.Marshal(req)
 	if err != nil {
@@ -122,10 +135,8 @@ func (s *Service) executeWalletTransfer(ctx context.Context, req *WalletTransfer
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Extract and forward authorization header from context if present
-	if token, ok := GetAuthorizationFromContext(ctx); ok {
-		httpReq.Header.Set("Authorization", token)
-	}
+	// Note: With mTLS, authentication happens at TLS layer
+	// No need to forward JWT for internal calls
 
 	resp, err := s.httpClient.Do(httpReq)
 	if err != nil {

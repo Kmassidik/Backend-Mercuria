@@ -1,0 +1,254 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: mercuria-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mercuria-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: mercuria-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - mercuria-network
+
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: mercuria-zookeeper
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    ports:
+      - "2181:2181"
+    networks:
+      - mercuria-network
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: mercuria-kafka
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "kafka-topics",
+          "--bootstrap-server",
+          "localhost:9092",
+          "--list",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 5
+    networks:
+      - mercuria-network
+
+  # ============================================
+  # Mercuria Services with mTLS Support
+  # ============================================
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.auth
+    container_name: mercuria-auth
+    depends_on:
+      - postgres
+      - redis
+      - kafka
+    ports:
+      - "8080:8080"
+    environment:
+      - AUTH_PORT=8080
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_NAME=mercuria_auth
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KAFKA_BROKERS=kafka:9092
+      - JWT_SECRET=your-secret-key-change-in-production
+      # mTLS Configuration
+      - MTLS_ENABLED=true
+      - MTLS_CA_CERT=/certs/ca/ca.crt
+      - MTLS_SERVER_CERT=/certs/auth/service.crt
+      - MTLS_SERVER_KEY=/certs/auth/service.key
+    volumes:
+      - ./certs:/certs:ro
+    networks:
+      - mercuria-network
+
+  wallet-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.wallet
+    container_name: mercuria-wallet
+    depends_on:
+      - postgres
+      - redis
+      - kafka
+    ports:
+      - "8081:8081"
+    environment:
+      - WALLET_PORT=8081
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_NAME=mercuria_wallet
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KAFKA_BROKERS=kafka:9092
+      - JWT_SECRET=your-secret-key-change-in-production
+      # mTLS Configuration
+      - MTLS_ENABLED=true
+      - MTLS_CA_CERT=/certs/ca/ca.crt
+      - MTLS_SERVER_CERT=/certs/wallet/service.crt
+      - MTLS_SERVER_KEY=/certs/wallet/service.key
+    volumes:
+      - ./certs:/certs:ro
+    networks:
+      - mercuria-network
+
+  transaction-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.transaction
+    container_name: mercuria-transaction
+    depends_on:
+      - postgres
+      - redis
+      - kafka
+      - wallet-service
+    ports:
+      - "8082:8082"
+    environment:
+      - TRANSACTION_PORT=8082
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_NAME=mercuria_transaction
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KAFKA_BROKERS=kafka:9092
+      - JWT_SECRET=your-secret-key-change-in-production
+      - WALLET_SERVICE_URL=https://wallet-service:8081
+      # mTLS Configuration
+      - MTLS_ENABLED=true
+      - MTLS_CA_CERT=/certs/ca/ca.crt
+      - MTLS_SERVER_CERT=/certs/transaction/service.crt
+      - MTLS_SERVER_KEY=/certs/transaction/service.key
+      - MTLS_CLIENT_CERT=/certs/transaction/service.crt
+      - MTLS_CLIENT_KEY=/certs/transaction/service.key
+    volumes:
+      - ./certs:/certs:ro
+    networks:
+      - mercuria-network
+
+  ledger-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.ledger
+    container_name: mercuria-ledger
+    depends_on:
+      - postgres
+      - redis
+      - kafka
+    ports:
+      - "8083:8083"
+    environment:
+      - LEDGER_PORT=8083
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_NAME=mercuria_ledger
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KAFKA_BROKERS=kafka:9092
+      - JWT_SECRET=your-secret-key-change-in-production
+      # mTLS Configuration
+      - MTLS_ENABLED=true
+      - MTLS_CA_CERT=/certs/ca/ca.crt
+      - MTLS_SERVER_CERT=/certs/ledger/service.crt
+      - MTLS_SERVER_KEY=/certs/ledger/service.key
+    volumes:
+      - ./certs:/certs:ro
+    networks:
+      - mercuria-network
+
+  analytics-service:
+    build:
+      context: .
+      dockerfile: Dockerfile.analytics
+    container_name: mercuria-analytics
+    depends_on:
+      - postgres
+      - redis
+      - kafka
+    ports:
+      - "8084:8084"
+    environment:
+      - ANALYTICS_PORT=8084
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=postgres
+      - DB_PASSWORD=postgres
+      - DB_NAME=mercuria_analytics
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - KAFKA_BROKERS=kafka:9092
+      - JWT_SECRET=your-secret-key-change-in-production
+      # mTLS Configuration
+      - MTLS_ENABLED=true
+      - MTLS_CA_CERT=/certs/ca/ca.crt
+      - MTLS_SERVER_CERT=/certs/analytics/service.crt
+      - MTLS_SERVER_KEY=/certs/analytics/service.key
+    volumes:
+      - ./certs:/certs:ro
+    networks:
+      - mercuria-network
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  mercuria-network:
+    driver: bridge
