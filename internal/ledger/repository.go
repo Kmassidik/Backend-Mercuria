@@ -107,7 +107,7 @@ func (r *Repository) CreateLedgerEntryTx(ctx context.Context, tx *sql.Tx, entry 
 	return entry, nil
 }
 
-// GetLedgerEntry retrieves a ledger entry by ID
+// GetLedgerEntry - Fix NULL metadata handling
 func (r *Repository) GetLedgerEntry(ctx context.Context, id string) (*LedgerEntry, error) {
 	query := `
 		SELECT 
@@ -140,11 +140,14 @@ func (r *Repository) GetLedgerEntry(ctx context.Context, id string) (*LedgerEntr
 		return nil, fmt.Errorf("failed to get ledger entry: %w", err)
 	}
 
-	// Unmarshal metadata
-	if len(metadataJSON) > 0 {
+	// Safely unmarshal metadata (handle NULL)
+	if len(metadataJSON) > 0 && string(metadataJSON) != "null" {
 		if err := json.Unmarshal(metadataJSON, &entry.Metadata); err != nil {
-			r.logger.Warnf("Failed to unmarshal metadata: %v", err)
+			r.logger.Warnf("Failed to unmarshal metadata for entry %s: %v", id, err)
+			entry.Metadata = make(map[string]interface{}) // Initialize empty map
 		}
+	} else {
+		entry.Metadata = make(map[string]interface{}) // Initialize empty map
 	}
 
 	return entry, nil
@@ -298,7 +301,6 @@ func (r *Repository) GetAllEntriesPaginated(ctx context.Context, limit, offset i
 	return r.scanEntries(rows)
 }
 
-// Helper function to scan multiple entries from rows
 func (r *Repository) scanEntries(rows *sql.Rows) ([]LedgerEntry, error) {
 	var entries []LedgerEntry
 
@@ -322,11 +324,14 @@ func (r *Repository) scanEntries(rows *sql.Rows) ([]LedgerEntry, error) {
 			return nil, fmt.Errorf("failed to scan entry: %w", err)
 		}
 
-		// Unmarshal metadata
-		if len(metadataJSON) > 0 {
+		// Safely unmarshal metadata (handle NULL)
+		if len(metadataJSON) > 0 && string(metadataJSON) != "null" {
 			if err := json.Unmarshal(metadataJSON, &entry.Metadata); err != nil {
 				r.logger.Warnf("Failed to unmarshal metadata: %v", err)
+				entry.Metadata = make(map[string]interface{})
 			}
+		} else {
+			entry.Metadata = make(map[string]interface{})
 		}
 
 		entries = append(entries, entry)

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"math/big"
 
 	"github.com/kmassidik/mercuria/internal/common/db"
 	"github.com/kmassidik/mercuria/internal/common/logger"
@@ -33,18 +34,19 @@ func NewService(
 }
 
 // CreateLedgerEntries creates double-entry ledger entries for a transaction
-// NOTE: Every transaction generates 2 entries - debit and credit
-// This is called by Kafka consumer when transaction.completed event arrives
 func (s *Service) CreateLedgerEntries(ctx context.Context, req *CreateLedgerEntriesRequest) ([]LedgerEntry, error) {
     var entries []LedgerEntry
 
+    // Check if ledger entries already exist for this transaction (idempotency)
+    existingEntries, err := s.repo.GetEntriesByTransaction(ctx, req.TransactionID)
+    if err == nil && len(existingEntries) > 0 {
+        s.logger.Infof("Ledger entries already exist for transaction %s, skipping", req.TransactionID)
+        return existingEntries, nil
+    }
+
     // Execute in transaction to ensure atomicity
-    // FIX: Change function signature to include context.Context
-    err := s.db.WithTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error { 
-        // 1. Get current balances from ledger (for audit trail)
-        // NOTE: The repo methods below must also be updated to use the provided 'ctx' and 'tx' if they are transactional.
-        // Assuming your repository methods (GetLatestBalance, CreateLedgerEntryTx, SaveEvent) use the passed context/tx correctly.
-        
+    err = s.db.WithTransaction(ctx, func(ctx context.Context, tx *sql.Tx) error {
+        // Get current balances
         fromBalance, err := s.repo.GetLatestBalance(ctx, req.FromWalletID)
         if err != nil {
             return fmt.Errorf("failed to get from balance: %w", err)
@@ -55,7 +57,7 @@ func (s *Service) CreateLedgerEntries(ctx context.Context, req *CreateLedgerEntr
             return fmt.Errorf("failed to get to balance: %w", err)
         }
 
-        // 2. Calculate new balances
+        // Calculate new balances
         newFromBalance, err := subtractAmounts(fromBalance, req.Amount)
         if err != nil {
             return fmt.Errorf("failed to calculate from balance: %w", err)
@@ -66,7 +68,7 @@ func (s *Service) CreateLedgerEntries(ctx context.Context, req *CreateLedgerEntr
             return fmt.Errorf("failed to calculate to balance: %w", err)
         }
 
-        // 3. Create DEBIT entry (money leaving source wallet)
+        // Create DEBIT entry
         debitEntry := &LedgerEntry{
             TransactionID: req.TransactionID,
             WalletID:      req.FromWalletID,
@@ -86,7 +88,7 @@ func (s *Service) CreateLedgerEntries(ctx context.Context, req *CreateLedgerEntr
         }
         entries = append(entries, *createdDebit)
 
-        // 4. Create CREDIT entry (money entering destination wallet)
+        // Create CREDIT entry
         creditEntry := &LedgerEntry{
             TransactionID: req.TransactionID,
             WalletID:      req.ToWalletID,
@@ -106,7 +108,7 @@ func (s *Service) CreateLedgerEntries(ctx context.Context, req *CreateLedgerEntr
         }
         entries = append(entries, *createdCredit)
 
-        // 5. Create outbox events for each entry
+        // Create outbox events
         for _, entry := range entries {
             event := &outbox.OutboxEvent{
                 AggregateID: entry.ID,
@@ -137,18 +139,17 @@ func (s *Service) CreateLedgerEntries(ctx context.Context, req *CreateLedgerEntr
         return nil, err
     }
 
-    // 6. Verify double-entry balance
+    // Verify double-entry balance
     balanced, err := s.repo.VerifyTransactionBalance(ctx, req.TransactionID)
     if err != nil {
         s.logger.Errorf("Failed to verify transaction balance: %v", err)
     } else if !balanced {
-        s.logger.Errorf("CRITICAL: Transaction %s is unbalanced!", req.TransactionID)
+        s.logger.Errorf("⚠️  CRITICAL: Transaction %s is unbalanced!", req.TransactionID)
     }
 
-    s.logger.Infof("Ledger entries created for transaction %s: %d entries", req.TransactionID, len(entries))
+    s.logger.Infof("✅ Ledger entries created for transaction %s: %d entries", req.TransactionID, len(entries))
     return entries, nil
 }
-
 // GetLedgerEntry retrieves a single ledger entry
 func (s *Service) GetLedgerEntry(ctx context.Context, id string) (*LedgerEntry, error) {
 	return s.repo.GetLedgerEntry(ctx, id)
@@ -213,74 +214,97 @@ func (s *Service) GetAllEntries(ctx context.Context, limit, offset int) ([]Ledge
 }
 
 // Helper functions for decimal arithmetic
-// NOTE: These should use big.Float for production accuracy
-
 func addAmounts(a, b string) (string, error) {
-	// Simplified implementation - use big.Float in production
-	var aVal, bVal float64
-	fmt.Sscanf(a, "%f", &aVal)
-	fmt.Sscanf(b, "%f", &bVal)
-	return fmt.Sprintf("%.4f", aVal+bVal), nil
+	aVal := new(big.Float)
+	bVal := new(big.Float)
+
+	if _, ok := aVal.SetString(a); !ok {
+		return "", fmt.Errorf("invalid amount: %s", a)
+	}
+	if _, ok := bVal.SetString(b); !ok {
+		return "", fmt.Errorf("invalid amount: %s", b)
+	}
+
+	result := new(big.Float).Add(aVal, bVal)
+	return result.Text('f', 4), nil
 }
 
 func subtractAmounts(a, b string) (string, error) {
-	// Simplified implementation - use big.Float in production
-	var aVal, bVal float64
-	fmt.Sscanf(a, "%f", &aVal)
-	fmt.Sscanf(b, "%f", &bVal)
-	result := aVal - bVal
-	if result < 0 {
-		return "", fmt.Errorf("result would be negative: %f", result)
+	aVal := new(big.Float)
+	bVal := new(big.Float)
+
+	if _, ok := aVal.SetString(a); !ok {
+		return "", fmt.Errorf("invalid amount: %s", a)
 	}
-	return fmt.Sprintf("%.4f", result), nil
+	if _, ok := bVal.SetString(b); !ok {
+		return "", fmt.Errorf("invalid amount: %s", b)
+	}
+
+	result := new(big.Float).Sub(aVal, bVal)
+	
+	// Check for negative result
+	if result.Sign() < 0 {
+		return "", fmt.Errorf("result would be negative")
+	}
+	
+	return result.Text('f', 4), nil
 }
 
 // ProcessTransactionEvent handles incoming transaction events from Kafka
 func (s *Service) ProcessTransactionEvent(ctx context.Context, key, value []byte) error {
 	s.logger.Debugf("Processing Kafka transaction event, key=%s", string(key))
 
-	// Define expected event payload (should match what transaction-service publishes)
+	// Parse event - match actual Kafka payload structure
 	var event struct {
 		TransactionID string `json:"transaction_id"`
 		FromWalletID  string `json:"from_wallet_id"`
 		ToWalletID    string `json:"to_wallet_id"`
 		Amount        string `json:"amount"`
 		Currency      string `json:"currency"`
-		Status        string `json:"status"`
-		Description   string `json:"description"`
+		Type          string `json:"type"`
 	}
 
-	// Parse Kafka event
 	if err := json.Unmarshal(value, &event); err != nil {
 		s.logger.Errorf("Failed to unmarshal transaction event: %v", err)
 		return err
 	}
 
-	s.logger.Infof("Ledger received transaction event: %s (status=%s)", event.TransactionID, event.Status)
-
-	// Only create ledger entries when transaction is completed
-	if event.Status != "completed" {
-		s.logger.Infof("Skipping transaction %s (status=%s)", event.TransactionID, event.Status)
-		return nil
+	// Validate required fields
+	if event.TransactionID == "" {
+		return fmt.Errorf("missing transaction_id in event")
+	}
+	if event.FromWalletID == "" {
+		return fmt.Errorf("missing from_wallet_id in event")
+	}
+	if event.ToWalletID == "" {
+		return fmt.Errorf("missing to_wallet_id in event")
+	}
+	if event.Amount == "" {
+		return fmt.Errorf("missing amount in event")
 	}
 
-	// Prepare ledger creation request
+	s.logger.Infof("Processing transaction: %s (type=%s, amount=%s %s)", 
+		event.TransactionID, event.Type, event.Amount, event.Currency)
+
+	// Create ledger entries request
 	req := &CreateLedgerEntriesRequest{
 		TransactionID: event.TransactionID,
 		FromWalletID:  event.FromWalletID,
 		ToWalletID:    event.ToWalletID,
 		Amount:        event.Amount,
 		Currency:      event.Currency,
-		Description:   event.Description,
+		Description:   fmt.Sprintf("%s transfer", event.Type),
 	}
 
-	// Create double-entry records in ledger
-	_, err := s.CreateLedgerEntries(ctx, req)
+	// Create double-entry ledger records
+	entries, err := s.CreateLedgerEntries(ctx, req)
 	if err != nil {
-		s.logger.Errorf("Failed to create ledger entries for transaction %s: %v", event.TransactionID, err)
+		s.logger.Errorf("Failed to create ledger entries for transaction %s: %v", 
+			event.TransactionID, err)
 		return err
 	}
 
-	s.logger.Infof("Ledger entries successfully processed for transaction %s", event.TransactionID)
+	s.logger.Infof("✅ Created %d ledger entries for transaction %s", 
+		len(entries), event.TransactionID)
 	return nil
 }

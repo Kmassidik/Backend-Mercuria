@@ -100,8 +100,8 @@ func main() {
 	handler.RegisterRoutes(publicMux, cfg.JWT.Secret)
 	
 	// Internal API - same routes but accessed via mTLS (no JWT needed between services)
-	handler.RegisterRoutes(internalMux, cfg.JWT.Secret)
-
+	handler.RegisterInternalRoutes(internalMux)
+	
 	// Health check endpoints
 	healthHandler := func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

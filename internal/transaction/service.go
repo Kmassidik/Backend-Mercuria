@@ -87,8 +87,10 @@ func (s *Service) getWalletFromService(ctx context.Context, walletID string) (*W
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Note: With mTLS, authentication happens at TLS layer
-	// No need to forward JWT for internal calls
+	// Forward Authorization header from context
+	if authHeader, ok := GetAuthorizationFromContext(ctx); ok {
+		req.Header.Set("Authorization", authHeader)
+	}
 	
 	resp, err := s.httpClient.Do(req)
 	if err != nil {
@@ -135,9 +137,11 @@ func (s *Service) executeWalletTransfer(ctx context.Context, req *WalletTransfer
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 
-	// Note: With mTLS, authentication happens at TLS layer
-	// No need to forward JWT for internal calls
-
+	// Forward Authorization header from context
+	if authHeader, ok := GetAuthorizationFromContext(ctx); ok {
+		httpReq.Header.Set("Authorization", authHeader)
+	}
+	
 	resp, err := s.httpClient.Do(httpReq)
 	if err != nil {
 		return fmt.Errorf("wallet service unreachable: %w", err)
