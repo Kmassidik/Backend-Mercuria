@@ -122,38 +122,26 @@ func main() {
     go outboxPublisher.Start(publisherCtx)
     log.Info("Outbox publisher started")
 
-    // Start Kafka consumer worker (The original second block, now properly corrected and running the consumer with health checks)
+    // Start Kafka consumer worker
     go func() {
         log.Info("Kafka consumer started for ledger-service")
-        lastSuccessfulRead := time.Now()
 
         for {
             select {
             case <-publisherCtx.Done():
                 log.Info("Kafka consumer stopped")
-                consumerHealthy.Store(false)
                 return
             default:
                 err := consumer.Consume(publisherCtx, func(ctx context.Context, key, value []byte) error {
-                    lastSuccessfulRead = time.Now()
-                    consumerHealthy.Store(true)
                     return service.ProcessTransactionEvent(ctx, key, value)
                 })
-
                 if err != nil {
                     log.Errorf("Error consuming Kafka message: %v", err)
-
-                    // Mark unhealthy if no successful reads for 30s
-                    if time.Since(lastSuccessfulRead) > 30*time.Second {
-                        consumerHealthy.Store(false)
-                    }
-
                     time.Sleep(5 * time.Second)
                 }
             }
         }
     }()
-
 
     server := &http.Server{
         Addr:         ":" + cfg.Service.Port,

@@ -107,7 +107,6 @@ func (r *Repository) CreateLedgerEntryTx(ctx context.Context, tx *sql.Tx, entry 
 	return entry, nil
 }
 
-// GetLedgerEntry - Fix NULL metadata handling
 func (r *Repository) GetLedgerEntry(ctx context.Context, id string) (*LedgerEntry, error) {
 	query := `
 		SELECT 
@@ -140,21 +139,20 @@ func (r *Repository) GetLedgerEntry(ctx context.Context, id string) (*LedgerEntr
 		return nil, fmt.Errorf("failed to get ledger entry: %w", err)
 	}
 
-	// Safely unmarshal metadata (handle NULL)
+	// ✅ FIX: Safely unmarshal metadata (handle NULL)
 	if len(metadataJSON) > 0 && string(metadataJSON) != "null" {
 		if err := json.Unmarshal(metadataJSON, &entry.Metadata); err != nil {
 			r.logger.Warnf("Failed to unmarshal metadata for entry %s: %v", id, err)
-			entry.Metadata = make(map[string]interface{}) // Initialize empty map
+			entry.Metadata = make(map[string]interface{})
 		}
 	} else {
-		entry.Metadata = make(map[string]interface{}) // Initialize empty map
+		entry.Metadata = make(map[string]interface{})
 	}
 
 	return entry, nil
 }
 
 // GetEntriesByTransaction retrieves all ledger entries for a transaction
-// NOTE: Should return 2+ entries (debit + credit) for double-entry bookkeeping
 func (r *Repository) GetEntriesByTransaction(ctx context.Context, transactionID string) ([]LedgerEntry, error) {
 	query := `
 		SELECT 
@@ -175,7 +173,6 @@ func (r *Repository) GetEntriesByTransaction(ctx context.Context, transactionID 
 }
 
 // GetEntriesByWallet retrieves ledger entries for a wallet with pagination
-// NOTE: Returns entries in reverse chronological order (newest first)
 func (r *Repository) GetEntriesByWallet(ctx context.Context, walletID string, limit, offset int) ([]LedgerEntry, error) {
 	query := `
 		SELECT 
@@ -197,7 +194,6 @@ func (r *Repository) GetEntriesByWallet(ctx context.Context, walletID string, li
 }
 
 // GetLatestBalance retrieves the most recent balance for a wallet
-// NOTE: Gets the balance field from the newest ledger entry
 func (r *Repository) GetLatestBalance(ctx context.Context, walletID string) (string, error) {
 	query := `
 		SELECT balance
@@ -324,7 +320,7 @@ func (r *Repository) scanEntries(rows *sql.Rows) ([]LedgerEntry, error) {
 			return nil, fmt.Errorf("failed to scan entry: %w", err)
 		}
 
-		// Safely unmarshal metadata (handle NULL)
+		// ✅ FIX: Safely unmarshal metadata (handle NULL)
 		if len(metadataJSON) > 0 && string(metadataJSON) != "null" {
 			if err := json.Unmarshal(metadataJSON, &entry.Metadata); err != nil {
 				r.logger.Warnf("Failed to unmarshal metadata: %v", err)

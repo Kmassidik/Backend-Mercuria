@@ -37,13 +37,19 @@ type TransactionLedger struct {
 
 // CreateLedgerEntriesRequest - Internal request for creating entries
 // NOTE: This is called by the Kafka consumer, not via HTTP
+// ✅ UPDATED: Added balance tracking fields
 type CreateLedgerEntriesRequest struct {
-	TransactionID string
-	FromWalletID  string
-	ToWalletID    string
-	Amount        string
-	Currency      string
-	Description   string
+	TransactionID     string
+	FromWalletID      string
+	ToWalletID        string
+	Amount            string
+	Currency          string
+	Description       string
+	// ✅ NEW: Optional balance tracking (if provided by transaction service)
+	FromBalanceBefore string // Balance before transaction
+	FromBalanceAfter  string // Balance after transaction
+	ToBalanceBefore   string // Balance before transaction
+	ToBalanceAfter    string // Balance after transaction
 }
 
 // API Response types
