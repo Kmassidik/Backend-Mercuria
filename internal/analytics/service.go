@@ -23,6 +23,9 @@ type Service interface {
 	// User Analytics
 	GetUserAnalytics(ctx context.Context, userID string, startDate, endDate time.Time) (*UserAnalyticsResponse, error)
 	GetUserSnapshots(ctx context.Context, userID string, startDate, endDate time.Time) ([]*UserSnapshot, error)
+
+	GetUserAnalyticsByWallets(ctx context.Context, walletIDs []string, startDate, endDate time.Time) (*UserAnalyticsResponse, error)
+	GetUserSnapshotsByWallets(ctx context.Context, walletIDs []string, startDate, endDate time.Time) ([]*UserSnapshot, error)
 }
 
 type service struct {
@@ -78,11 +81,12 @@ func (s *service) ProcessKafkaEvent(ctx context.Context, value []byte) error {
 
 // Helper to get opposite wallet from metadata
 func getToWalletID(entryType string, metadata map[string]interface{}) string {
-	if entryType == "debit" {
+	switch entryType {
+	case "debit":
 		if toWallet, ok := metadata["to_wallet_id"].(string); ok {
 			return toWallet
 		}
-	} else if entryType == "credit" {
+	case "credit":
 		if fromWallet, ok := metadata["from_wallet_id"].(string); ok {
 			return fromWallet
 		}
@@ -369,4 +373,58 @@ func (s *service) invalidateCacheForDate(ctx context.Context, date time.Time) er
 		}
 	}
 	return iter.Err()
+}
+
+func (s *service) GetUserAnalyticsByWallets(ctx context.Context, walletIDs []string, startDate, endDate time.Time) (*UserAnalyticsResponse, error) {
+	if len(walletIDs) == 0 {
+		return &UserAnalyticsResponse{
+			UserID:           "",
+			Period:           fmt.Sprintf("%s to %s", startDate.Format("2006-01-02"), endDate.Format("2006-01-02")),
+			TotalSent:        0,
+			TotalReceived:    0,
+			NetAmount:        0,
+			TransactionCount: 0,
+			TotalFeesPaid:    0,
+		}, nil
+	}
+
+	// Aggregate across all wallets
+	var totalSent, totalReceived, totalFees float64
+	var totalCount int64
+
+	for _, walletID := range walletIDs {
+		analytics, err := s.repo.GetUserAnalytics(ctx, walletID, startDate, endDate)
+		if err != nil {
+			continue // Skip failed wallets
+		}
+
+		totalSent += analytics.TotalSent
+		totalReceived += analytics.TotalReceived
+		totalCount += analytics.TransactionCount
+		totalFees += analytics.TotalFeesPaid
+	}
+
+	return &UserAnalyticsResponse{
+		UserID:           walletIDs[0], // First wallet as reference
+		Period:           fmt.Sprintf("%s to %s", startDate.Format("2006-01-02"), endDate.Format("2006-01-02")),
+		TotalSent:        totalSent,
+		TotalReceived:    totalReceived,
+		NetAmount:        totalReceived - totalSent,
+		TransactionCount: totalCount,
+		TotalFeesPaid:    totalFees,
+	}, nil
+}
+
+func (s *service) GetUserSnapshotsByWallets(ctx context.Context, walletIDs []string, startDate, endDate time.Time) ([]*UserSnapshot, error) {
+	var allSnapshots []*UserSnapshot
+
+	for _, walletID := range walletIDs {
+		snapshots, err := s.repo.GetUserSnapshots(ctx, walletID, startDate, endDate)
+		if err != nil {
+			continue
+		}
+		allSnapshots = append(allSnapshots, snapshots...)
+	}
+
+	return allSnapshots, nil
 }

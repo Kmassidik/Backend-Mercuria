@@ -16,6 +16,7 @@ import (
 	"github.com/kmassidik/mercuria/internal/common/kafka"
 	"github.com/kmassidik/mercuria/internal/common/logger"
 	"github.com/kmassidik/mercuria/internal/common/middleware"
+	"github.com/kmassidik/mercuria/internal/common/mtls"
 	"github.com/kmassidik/mercuria/internal/common/redis"
 )
 
@@ -35,6 +36,14 @@ func main() {
 	// Initialize logger
 	log := logger.New("analytics-service")
 
+	// Load mTLS configuration
+	mtlsConfig := mtls.LoadFromEnv()
+	if mtlsConfig.Enabled {
+		log.Info("🔐 mTLS is ENABLED for internal service communication")
+	} else {
+		log.Info("⚠️  mTLS is DISABLED - using HTTP only")
+	}
+
 	// Connect to database
 	database, err := db.Connect(cfg.Database, log)
 	if err != nil {
@@ -50,15 +59,11 @@ func main() {
 	defer redisClient.Close()
 
 	// Initialize Kafka consumer
-	consumer := kafka.NewConsumer(cfg.Kafka, "analytics-group", log)
+	consumer := kafka.NewConsumer(cfg.Kafka, "ledger.entry_created", log)
 	defer consumer.Close()
 
-	// Verify Kafka is reachable (through consumer check)
+	// Verify Kafka is reachable
 	log.Info("Checking Kafka connection...")
-	_, kafkaCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer kafkaCancel()
-
-	// Simple check - if consumer initialized, Kafka should be available
 	if consumer == nil {
 		log.Fatal("❌ Failed to initialize Kafka consumer")
 	}
@@ -73,17 +78,84 @@ func main() {
 	// Initialize handler
 	handler := analytics.NewHandler(service)
 
-	// Create HTTP server
-	mux := http.NewServeMux()
+	// =============================================================
+	// PUBLIC SERVER - Port 8084 (HTTPS + JWT for external clients)
+	// =============================================================
+	publicMux := http.NewServeMux()
 
-	// Apply middleware
-	var httpHandler http.Handler = mux
-	httpHandler = middleware.CORS(httpHandler)
-	httpHandler = middleware.Logging(log)(httpHandler)
-	httpHandler = middleware.Recovery(log)(httpHandler)
+	// Apply middleware to public router
+	var publicHandler http.Handler = publicMux
+	publicHandler = middleware.CORS(publicHandler)
+	publicHandler = middleware.Logging(log)(publicHandler)
+	publicHandler = middleware.Recovery(log)(publicHandler)
 
-	// Register routes
-	analytics.SetupRoutes(mux, handler)
+	// Register routes with JWT protection
+	analytics.SetupRoutes(publicMux, handler, cfg.JWT.Secret)
+
+	publicPort := cfg.Service.Port // Default: 8084
+	publicServer := &http.Server{
+		Addr:         ":" + publicPort,
+		Handler:      publicHandler,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 15 * time.Second,
+		IdleTimeout:  60 * time.Second,
+	}
+
+	// Start public server
+	go func() {
+		log.Infof("🌐 Public API starting on port %s (HTTPS + JWT)", publicPort)
+		if err := publicServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("Failed to start public server: %v", err)
+		}
+	}()
+
+	// =============================================================
+	// INTERNAL SERVER - Port 9084 (mTLS for service-to-service)
+	// =============================================================
+	if mtlsConfig.Enabled {
+		internalMux := http.NewServeMux()
+
+		// Apply middleware to internal router (no JWT needed)
+		var internalHandler http.Handler = internalMux
+		internalHandler = middleware.Logging(log)(internalHandler)
+		internalHandler = middleware.Recovery(log)(internalHandler)
+
+		// Register internal routes (no JWT middleware)
+		analytics.SetupInternalRoutes(internalMux, handler)
+
+		internalPort := os.Getenv("ANALYTICS_INTERNAL_PORT")
+		if internalPort == "" {
+			internalPort = "9084" // Default internal port
+		}
+
+		tlsConfig, err := mtlsConfig.ServerTLSConfig()
+		if err != nil {
+			log.Fatalf("Failed to load mTLS config: %v", err)
+		}
+
+		internalServer := &http.Server{
+			Addr:         ":" + internalPort,
+			Handler:      internalHandler,
+			TLSConfig:    tlsConfig,
+			ReadTimeout:  15 * time.Second,
+			WriteTimeout: 15 * time.Second,
+			IdleTimeout:  60 * time.Second,
+		}
+
+		go func() {
+			log.Infof("🔐 Internal API starting on port %s (mTLS)", internalPort)
+			if err := internalServer.ListenAndServeTLS("", ""); err != nil && err != http.ErrServerClosed {
+				log.Fatalf("Failed to start internal server: %v", err)
+			}
+		}()
+
+		// Add internal server to shutdown list
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			internalServer.Shutdown(shutdownCtx)
+		}()
+	}
 
 	// Start Kafka consumer worker
 	consumerCtx, cancelConsumer := context.WithCancel(context.Background())
@@ -109,39 +181,25 @@ func main() {
 		}
 	}()
 
-	server := &http.Server{
-		Addr:         ":" + cfg.Service.Port,
-		Handler:      httpHandler,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
-
-	// Start HTTP server in goroutine
-	go func() {
-		log.Infof("Analytics service starting on port %s", cfg.Service.Port)
-		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("Failed to start server: %v", err)
-		}
-	}()
-
-	// Graceful shutdown
+	// =============================================================
+	// GRACEFUL SHUTDOWN
+	// =============================================================
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
-	log.Info("Shutting down server...")
+	log.Info("🛑 Shutting down servers...")
 
 	// Stop background workers
 	cancelConsumer()
 
-	// Shutdown HTTP server
+	// Shutdown public server
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	if err := server.Shutdown(shutdownCtx); err != nil {
-		log.Fatalf("Server forced to shutdown: %v", err)
+	if err := publicServer.Shutdown(shutdownCtx); err != nil {
+		log.Fatalf("Public server forced to shutdown: %v", err)
 	}
 
-	log.Info("Server exited")
+	log.Info("✅ All servers exited gracefully")
 }

@@ -2,8 +2,11 @@ package analytics
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"time"
+
+	"github.com/kmassidik/mercuria/internal/common/middleware"
 )
 
 type Handler struct {
@@ -43,6 +46,9 @@ func writeError(w http.ResponseWriter, status int, err string, message string) {
 
 // GetDailyMetrics handles GET /api/v1/analytics/daily
 func (h *Handler) GetDailyMetrics(w http.ResponseWriter, r *http.Request) {
+	// Public API requires JWT, internal mTLS calls are also allowed
+	// No explicit check needed - middleware handles authentication
+
 	// Parse query parameters
 	startDateStr := r.URL.Query().Get("start_date")
 	endDateStr := r.URL.Query().Get("end_date")
@@ -90,6 +96,9 @@ func (h *Handler) GetDailyMetrics(w http.ResponseWriter, r *http.Request) {
 
 // GetHourlyMetrics handles GET /api/v1/analytics/hourly
 func (h *Handler) GetHourlyMetrics(w http.ResponseWriter, r *http.Request) {
+	// Public API requires JWT, internal mTLS calls are also allowed
+	// No explicit check needed - middleware handles authentication
+
 	// Parse query parameters
 	startTimeStr := r.URL.Query().Get("start_time")
 	endTimeStr := r.URL.Query().Get("end_time")
@@ -137,6 +146,9 @@ func (h *Handler) GetHourlyMetrics(w http.ResponseWriter, r *http.Request) {
 
 // GetMetricsSummary handles GET /api/v1/analytics/summary
 func (h *Handler) GetMetricsSummary(w http.ResponseWriter, r *http.Request) {
+	// Public API requires JWT, internal mTLS calls are also allowed
+	// No explicit check needed - middleware handles authentication
+
 	// Parse query parameters
 	startDateStr := r.URL.Query().Get("start_date")
 	endDateStr := r.URL.Query().Get("end_date")
@@ -186,73 +198,19 @@ func (h *Handler) GetMetricsSummary(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GetUserAnalytics handles GET /api/v1/analytics/users/{user_id}
+// GetUserAnalytics handles GET /api/v1/analytics/me
+// Gets analytics for the authenticated user across all their wallets
 func (h *Handler) GetUserAnalytics(w http.ResponseWriter, r *http.Request) {
-	// Extract user_id from URL path
-	userID := r.PathValue("user_id")
-	if userID == "" {
-		writeError(w, http.StatusBadRequest, "invalid_parameters", "user_id is required")
+	userID, ok := middleware.GetUserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
 		return
 	}
 
-	// Parse query parameters
+	// Parse dates with defaults (last 30 days)
 	startDateStr := r.URL.Query().Get("start_date")
 	endDateStr := r.URL.Query().Get("end_date")
 
-	// Default to last 30 days if not specified
-	endDate := time.Now().Truncate(24 * time.Hour)
-	startDate := endDate.AddDate(0, 0, -30)
-
-	if startDateStr != "" {
-		var err error
-		startDate, err = time.Parse("2006-01-02", startDateStr)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_date_format", "start_date must be in YYYY-MM-DD format")
-			return
-		}
-	}
-
-	if endDateStr != "" {
-		var err error
-		endDate, err = time.Parse("2006-01-02", endDateStr)
-		if err != nil {
-			writeError(w, http.StatusBadRequest, "invalid_date_format", "end_date must be in YYYY-MM-DD format")
-			return
-		}
-	}
-
-	// Validate date range
-	if endDate.Before(startDate) {
-		writeError(w, http.StatusBadRequest, "invalid_date_range", "end_date must be after start_date")
-		return
-	}
-
-	// Fetch user analytics
-	analytics, err := h.service.GetUserAnalytics(r.Context(), userID, startDate, endDate)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to fetch user analytics")
-		return
-	}
-
-	writeJSON(w, http.StatusOK, SuccessResponse{
-		Data: analytics,
-	})
-}
-
-// GetUserSnapshots handles GET /api/v1/analytics/users/{user_id}/snapshots
-func (h *Handler) GetUserSnapshots(w http.ResponseWriter, r *http.Request) {
-	// Extract user_id from URL path
-	userID := r.PathValue("user_id")
-	if userID == "" {
-		writeError(w, http.StatusBadRequest, "invalid_parameters", "user_id is required")
-		return
-	}
-
-	// Parse query parameters
-	startDateStr := r.URL.Query().Get("start_date")
-	endDateStr := r.URL.Query().Get("end_date")
-
-	// Default to last 30 days if not specified
 	endDate := time.Now().Truncate(24 * time.Hour)
 	startDate := endDate.AddDate(0, 0, -30)
 
@@ -286,8 +244,113 @@ func (h *Handler) GetUserSnapshots(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch user snapshots
-	snapshots, err := h.service.GetUserSnapshots(r.Context(), userID, startDate, endDate)
+	// Get user's wallet IDs from Wallet Service
+	walletClient := NewWalletClient()
+	authToken := r.Header.Get("Authorization")
+	
+	walletIDs, err := walletClient.GetUserWalletIDs(r.Context(), userID, authToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "wallet_service_error", fmt.Sprintf("Failed to fetch user wallets: %v", err))
+		return
+	}
+
+	// If user has no wallets, return empty analytics
+	if len(walletIDs) == 0 {
+		writeJSON(w, http.StatusOK, SuccessResponse{
+			Data: &UserAnalyticsResponse{
+				UserID:           userID,
+				Period:           fmt.Sprintf("%s to %s", startDate.Format("2006-01-02"), endDate.Format("2006-01-02")),
+				TotalSent:        0,
+				TotalReceived:    0,
+				NetAmount:        0,
+				TransactionCount: 0,
+				TotalFeesPaid:    0,
+			},
+		})
+		return
+	}
+
+	// Fetch analytics across all user's wallets
+	analytics, err := h.service.GetUserAnalyticsByWallets(r.Context(), walletIDs, startDate, endDate)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to fetch user analytics")
+		return
+	}
+
+	// Set the user ID in the response
+	analytics.UserID = userID
+
+	writeJSON(w, http.StatusOK, SuccessResponse{
+		Data: analytics,
+	})
+}
+
+// GetUserSnapshots handles GET /api/v1/analytics/me/snapshots
+// Gets daily snapshots for the authenticated user across all their wallets
+func (h *Handler) GetUserSnapshots(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.GetUserIDFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "unauthorized", "Authentication required")
+		return
+	}
+
+	// Parse dates with defaults (last 30 days)
+	startDateStr := r.URL.Query().Get("start_date")
+	endDateStr := r.URL.Query().Get("end_date")
+
+	endDate := time.Now().Truncate(24 * time.Hour)
+	startDate := endDate.AddDate(0, 0, -30)
+
+	if startDateStr != "" {
+		var err error
+		startDate, err = time.Parse("2006-01-02", startDateStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_date_format", "start_date must be in YYYY-MM-DD format")
+			return
+		}
+	}
+
+	if endDateStr != "" {
+		var err error
+		endDate, err = time.Parse("2006-01-02", endDateStr)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_date_format", "end_date must be in YYYY-MM-DD format")
+			return
+		}
+	}
+
+	// Validate date range
+	if endDate.Before(startDate) {
+		writeError(w, http.StatusBadRequest, "invalid_date_range", "end_date must be after start_date")
+		return
+	}
+
+	// Limit to 90 days
+	if endDate.Sub(startDate) > 90*24*time.Hour {
+		writeError(w, http.StatusBadRequest, "date_range_too_large", "date range cannot exceed 90 days")
+		return
+	}
+
+	// Get user's wallet IDs from Wallet Service
+	walletClient := NewWalletClient()
+	authToken := r.Header.Get("Authorization")
+	
+	walletIDs, err := walletClient.GetUserWalletIDs(r.Context(), userID, authToken)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "wallet_service_error", fmt.Sprintf("Failed to fetch user wallets: %v", err))
+		return
+	}
+
+	// If user has no wallets, return empty snapshots
+	if len(walletIDs) == 0 {
+		writeJSON(w, http.StatusOK, SuccessResponse{
+			Data: []UserSnapshot{},
+		})
+		return
+	}
+
+	// Fetch snapshots across all user's wallets
+	snapshots, err := h.service.GetUserSnapshotsByWallets(r.Context(), walletIDs, startDate, endDate)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "internal_error", "Failed to fetch user snapshots")
 		return
@@ -309,9 +372,8 @@ func (h *Handler) HealthCheck(w http.ResponseWriter, r *http.Request) {
 
 // ReadinessCheck handles GET /ready
 func (h *Handler) ReadinessCheck(w http.ResponseWriter, r *http.Request) {
-	// Could add database connectivity check here
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"status": "ready",
+		"status":  "ready",
 		"service": "analytics",
 	})
 }

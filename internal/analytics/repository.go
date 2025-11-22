@@ -358,11 +358,10 @@ func (r *repository) GetUserSnapshotByDate(ctx context.Context, userID string, d
 	return &s, nil
 }
 
-// CreateEventLog creates a new event processing log entry
 func (r *repository) CreateEventLog(ctx context.Context, log *EventProcessingLog) error {
 	query := `
 		INSERT INTO event_processing_log (
-			event_id, event_type, topic, partition, offset, event_data,
+			event_id, event_type, topic, partition, "offset", event_data,
 			processed_at, processing_time_ms, status, error_message, retry_count
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		RETURNING id, created_at
@@ -389,10 +388,9 @@ func (r *repository) CreateEventLog(ctx context.Context, log *EventProcessingLog
 	return nil
 }
 
-// GetEventLogByEventID retrieves an event log by event ID (idempotency check)
 func (r *repository) GetEventLogByEventID(ctx context.Context, eventID string) (*EventProcessingLog, error) {
 	query := `
-		SELECT id, event_id, event_type, topic, partition, offset, event_data,
+		SELECT id, event_id, event_type, topic, partition, "offset", event_data,
 			   processed_at, processing_time_ms, status, error_message, retry_count, created_at
 		FROM event_processing_log
 		WHERE event_id = $1

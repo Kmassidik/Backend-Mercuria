@@ -60,6 +60,7 @@ func (s *Service) CreateWallet(ctx context.Context, req *CreateWalletRequest) (*
 			Status:   StatusActive,
 		}
 
+
 		// Insert wallet
 		query := `
 			INSERT INTO wallets (user_id, currency, balance, status)
