@@ -1,0 +1,241 @@
+# Mercuria Backend - Docker Ignore File
+# Excludes files from Docker build context for faster builds
+
+# ============================================
+# Git & Version Control
+# ============================================
+.git/
+.gitignore
+.gitattributes
+.gitmodules
+**/.git
+**/.gitignore
+
+# ============================================
+# Documentation (not needed in container)
+# ============================================
+*.md
+!README.md
+docs/
+documentation/
+*.txt
+LICENSE
+CHANGELOG
+AUTHORS
+
+# Keep only essential docs for runtime
+!Mercuria_Backend_PRD_v4.md
+
+# ============================================
+# IDE & Editor Files
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ============================================
+# Dependencies (will be downloaded in container)
+# ============================================
+vendor/
+node_modules/
+
+# ============================================
+# Build Artifacts (rebuilt in container)
+# ============================================
+bin/
+dist/
+build/
+*.exe
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# ============================================
+# Temporary & Cache Files
+# ============================================
+tmp/
+temp/
+.cache/
+*.tmp
+*.log
+logs/
+
+# ============================================
+# Test Files (not needed in production)
+# ============================================
+*_test.go
+**/*_test.go
+tests/
+test/
+testing/
+coverage.out
+coverage.html
+*.coverprofile
+
+# ============================================
+# Development Environment
+# ============================================
+.env
+.env.*
+*.local
+!.env.example
+!example.env
+
+# ============================================
+# CI/CD Files (not needed in container)
+# ============================================
+.github/
+.gitlab-ci.yml
+.travis.yml
+.circleci/
+Jenkinsfile
+azure-pipelines.yml
+
+# ============================================
+# Docker Files (avoid recursion)
+# ============================================
+Dockerfile*
+docker-compose*.yml
+.dockerignore
+
+# Keep only the Dockerfile being built
+!Dockerfile
+
+# ============================================
+# Scripts (development only)
+# ============================================
+scripts/
+*.sh
+
+# Keep migration scripts if needed
+!migrations/
+
+# ============================================
+# Database Files (don't copy local data)
+# ============================================
+*.db
+*.sqlite
+*.sqlite3
+postgres-data/
+pgdata/
+*.dump
+
+# ============================================
+# Certificates (will be mounted or generated)
+# ============================================
+certs/
+*.pem
+*.key
+*.crt
+*.csr
+
+# ============================================
+# Kubernetes & Deployment Configs
+# ============================================
+k8s/
+kubernetes/
+helm/
+charts/
+*.yaml
+*.yml
+
+# Keep Go configuration files
+!go.mod
+!go.sum
+
+# ============================================
+# Backup & Archive Files
+# ============================================
+*.bak
+*.backup
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.rar
+
+# ============================================
+# Monitoring & Observability Data
+# ============================================
+prometheus-data/
+grafana-data/
+jaeger-data/
+
+# ============================================
+# Message Queue Data
+# ============================================
+kafka-data/
+zookeeper-data/
+
+# ============================================
+# Redis Data
+# ============================================
+dump.rdb
+appendonly.aof
+
+# ============================================
+# Profiling & Debug Files
+# ============================================
+*.prof
+*.pprof
+cpu.out
+mem.out
+trace.out
+
+# ============================================
+# OS Files
+# ============================================
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ============================================
+# Security & Secrets
+# ============================================
+secrets/
+*.secret
+api_keys.txt
+credentials.json
+
+# ============================================
+# Project Specific
+# ============================================
+# Local development data
+dev-data/
+local-data/
+
+# Migration backups
+migrations/backup/
+
+# ============================================
+# INCLUDE (Important Files for Container)
+# ============================================
+# These MUST be included in Docker image:
+# - go.mod, go.sum (for dependencies)
+# - cmd/ directory (application entry points)
+# - internal/ directory (application code)
+# - pkg/ directory (shared packages)
+# - migrations/ (if running migrations in container)
+# - example.env (for default configuration)
+
+# ============================================
+# Size Optimization
+# ============================================
+# Exclude large files that aren't needed
+*.mp4
+*.avi
+*.mov
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.pdf
+*.iso
+
+# Exclude development tools
+Makefile
